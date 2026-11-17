@@ -1,0 +1,20 @@
+# Dependencies are installed inside the image
+node_modules
+npm-debug.log*
+
+# Secrets and local config
+.env
+.env.*
+
+# Git and editor files
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+# Not needed at runtime
+test
+README.md
+Dockerfile
+.dockerignore
