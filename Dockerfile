@@ -15,6 +15,12 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy the application source
 COPY --chown=node:node src ./src
 
+# Traceability: the CI passes the commit SHA; it is exposed by GET / and as OCI labels
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.source="https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+
 # Run as the non-root "node" user provided by the official image
 USER node
 
