@@ -1,83 +1,150 @@
-# EFREI DevOps – Project Lab 1
+# EFREI DevOps — Lab 2
 
-Minimal [Fastify](https://fastify.dev) API.
+**Session 2: Kubernetes, Multi-environment Deployment and Audit**  
+Continuation of [Lab 1](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1), a Fastify API exposing `GET /health` on port 3000.
 
-## Requirements
+## Architecture
 
-- Node.js >= 20
+`Git commit → GitHub Actions → GHCR image → Kustomize overlays → Kubernetes Deployment → Service → Pods`
 
-## Usage
+| Environment | Namespace | Replicas | APP_ENV |
+| --- | --- | ---: | --- |
+| Development | `dev` | 3 | `dev` |
+| Staging | `staging` | 3 | `staging` |
+| Production | `prod` | 5 | `prod` |
+
+All three environments share the same base Deployment and Service. `myapp` exposes port 80 and forwards traffic to the application's port 3000. Readiness and liveness probes check `/health`. CPU/memory requests and limits are configured. Rolling updates use `maxSurge: 1`, `maxUnavailable: 0`.
+
+## Prerequisites
+
+Docker, `kind`, `kubectl` with integrated Kustomize, access to the published Lab 1 GHCR image. If GHCR is private, configure `imagePullSecrets` separately and do not commit credentials.
+
+**Image reference:** `ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce` (Lab 1 `main`, merge PR #5). The commit SHA is confirmed from Git history; **publication and pull access on GHCR have not been verified**. Confirm the package version and access before deploying. All three overlays pin this same tag; the Deployment and Pod template annotate the same source commit. The pipeline run URL and reviewer must be obtained from the actual Lab 1 GitHub Actions run / pull request, not inferred.
+
+## 1. Cluster and namespaces
 
 ```bash
-npm install
-npm start          # listens on http://0.0.0.0:3000
-npm run dev        # restarts on file changes
-npm test           # runs tests with node:test
+kind create cluster --name devops-lab
+kubectl cluster-info
+kubectl get nodes
+for ns in dev staging prod; do kubectl create namespace "$ns"; done
 ```
 
-Environment variables: `PORT` (default `3000`), `HOST` (default `0.0.0.0`).
+## 2. First deployment (base)
 
-## Endpoints
-
-| Method | Path      | Response       |
-|--------|-----------|----------------|
-| GET    | `/health` | `200` · `OK`   |
+The base Deployment requires `myapp-config` and `myapp-secret` in the target namespace. Create them first (the key is deliberately fake):
 
 ```bash
-curl http://localhost:3000/health
-# OK
+kubectl create configmap myapp-config --from-literal=APP_ENV=dev -n dev
+kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n dev
+kubectl apply -f k8s/base/ -n dev
+kubectl rollout status deployment/myapp -n dev --timeout=180s
+kubectl get all -n dev
+kubectl port-forward svc/myapp 8080:80 -n dev
+# In another terminal: curl -i http://localhost:8080/health
 ```
 
-# Lab 1 – Answers
+Observe self-healing and scaling:
 
-### Question 1 — Why forbid direct pushes to `main`?
+```bash
+kubectl get pods -n dev
+kubectl delete pod <POD_NAME> -n dev
+kubectl get pods -n dev -w
+kubectl scale deployment/myapp --replicas=5 -n dev
+kubectl get deployment myapp -n dev
+kubectl scale deployment/myapp --replicas=3 -n dev
+```
 
-`main` is the branch that gets published: every push to `main` builds and publishes a Docker image to GHCR. It must always be in a working state. Forbidding direct pushes forces every change to go through a Pull Request, which:
+## 3. Probes, resources and configuration
 
-- **Runs the CI before the merge.** The required `build-test` check (lint, tests, Docker build) must pass, so broken code cannot reach `main`.
-- **Allows code review.** A teammate reads the change before it is merged, which catches bugs earlier and shares knowledge across the team.
-- **Keeps a trace of every change.** Each change on `main` is linked to a PR with its discussion, CI results and approval. This makes it easy to understand, audit or revert later.
-- **Protects the shared history.** No one can accidentally `git push --force` and rewrite or lose commits on `main`.
+The base manifest includes readiness/liveness probes, CPU/memory resources, `APP_ENV` from a ConfigMap and `API_KEY` from a Secret. To observe a failed probe, temporarily change `/health` to `/broken` in a disposable deployment, apply it, then inspect `kubectl describe pod ... -n dev` and restore `/health`. Never leave the broken probe committed.
 
-### Question 2 — What is the difference between an image and a container?
+## 4. Kustomize environments
 
-- An **image** is a read-only, immutable template. It is a stack of filesystem layers (base OS, Node.js, `node_modules`, our `src/`) plus metadata (user, exposed port, start command). It is built once with `docker build`, can be pushed to and pulled from a registry, and does not run by itself. Example: `myapp:0.1`.
-- A **container** is a running (or stopped) instance of an image. Docker adds a thin writable layer on top of the image's layers, then starts an isolated process with its own network and filesystem. It is created with `docker run`. Example: the `myapp` container.
+**Important:** do not mix the initial `kubectl apply -f k8s/base/` workflow with overlays without cleaning up: Kustomize-generated ConfigMap names have hashes and should be managed consistently. For the final environment deployment, remove the initial `dev` Deployment and Service first (do not delete the namespace), then deploy overlays.
 
-An image is to a container what a program on disk is to a running process, or what a class is to an object. One image can run many containers at the same time. Deleting a container, and anything it wrote, never changes the image.
+```bash
+kubectl delete -f k8s/base/ -n dev --ignore-not-found
+kubectl kustomize k8s/overlays/prod
+```
 
-### Question 3 — Compare the size of your image with a non-slim base image
+Create the fake Secret in each namespace **before applying the overlays** (the ConfigMaps are generated automatically):
 
-Same Dockerfile and same app; only the `FROM` line changes. Measured locally with Docker Desktop on arm64:
+```bash
+for ns in dev staging prod; do
+  kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
+kubectl apply -k k8s/overlays/dev
+kubectl apply -k k8s/overlays/staging
+kubectl apply -k k8s/overlays/prod
+for ns in dev staging prod; do
+  kubectl rollout status deployment/myapp -n "$ns" --timeout=180s
+  kubectl get all -n "$ns"
+done
+kubectl get deploy -A -l app=myapp
+```
 
-| Base image | OS | Unpacked size | Compressed (download) |
-|---|---|---|---|
-| `node:22` (full) | Debian 12 | ~1.2 GB | ~401 MB |
-| `node:22-slim` | Debian 12 | ~268 MB | ~82 MB |
-| **`node:22-alpine`** (ours) | Alpine 3.24 | **~183 MB** | **~63 MB** |
+The generated ConfigMaps are environment-specific. The demo Secret is created outside Git, avoiding real credentials in manifests. In a real environment, use a secret manager.
 
-**Observation:** the full image is about **6.5 times larger** than the Alpine one, although our app (`src/` + `node_modules`, about 15 MB) is identical in all three. Almost all the size comes from the base image. The full `node:22` ships a complete Debian with build tools (`gcc`, `git`, `python3`, `curl`, …) that the app never uses at runtime; none of them exist in the Alpine image. A smaller image:
+## 5. Rolling update and rollback
 
-- is faster to pull and start, which speeds up CI runs, deployments and scaling;
-- uses less disk and registry storage;
-- has a smaller attack surface: fewer packages means fewer vulnerabilities (CVEs) and no compiler for an attacker to use.
+For a genuine successful rolling update, first publish a **new working Lab 1 image** with a changed application response and tests. Record the original SHA and the new SHA. Update `newTag` in `k8s/overlays/dev/kustomization.yaml` to the new SHA and apply:
 
-The trade-off is that Alpine uses `musl` instead of `glibc`, which can break some npm packages with native code. `-slim` (Debian with `glibc`) is the middle ground in that case.
+```bash
+kubectl apply -k k8s/overlays/dev
+kubectl rollout status deployment/myapp -n dev --timeout=180s
+kubectl rollout history deployment/myapp -n dev
+```
 
-### Question 4 — Why tag the image with the commit SHA rather than `latest`?
+To demonstrate a failed image pull, set the dev overlay's `newTag` to `intentionally-missing-image-tag`, apply it and inspect the rollout. The rollout should stall; do not assume `kubectl rollout status` will finish successfully:
 
-- **Unique and immutable.** A SHA identifies exactly one version of the code. `latest` is a moving tag, overwritten on every push, so you never know which code it actually contains.
-- **Traceability.** From `ghcr.io/valentin-meltz/efrei-devops_project-lab-1:<sha>` you can go straight back to the commit, its Pull Request and the pipeline run that built it (commit → pipeline run → image).
-- **Reproducible deployments and easy rollbacks.** Deploying `:<sha>` always runs exactly the same image, and rolling back means redeploying the previous SHA. With `latest`, two servers can run different code under the same tag, especially since Docker does not pull `latest` again if it already has a local copy.
+```bash
+kubectl apply -k k8s/overlays/dev
+kubectl get pods -n dev
+kubectl describe deployment/myapp -n dev
+kubectl rollout status deployment/myapp -n dev --timeout=60s
+kubectl rollout undo deployment/myapp -n dev
+kubectl rollout status deployment/myapp -n dev --timeout=180s
+kubectl rollout history deployment/myapp -n dev
+```
 
-`latest` can still be added as a convenience tag, but deployments should always reference the SHA.
+**After the demo**, restore the valid `newTag` in Git and re-apply the overlay so the declarative state matches the cluster. Record the output and images used for the evidence.
 
-### Question 5 — What does "fail fast" mean in a pipeline?
+## 6. RBAC and audit traceability
 
-It means stopping the pipeline at the first failure, and ordering the steps so that the fastest and cheapest checks run first. The developer gets feedback in seconds instead of minutes, and no time or resources are spent on a build that is already known to be broken.
+```bash
+kubectl apply -k k8s/rbac
+kubectl auth can-i list pods -n dev --as=system:serviceaccount:dev:viewer
+kubectl auth can-i delete pods -n dev --as=system:serviceaccount:dev:viewer
+kubectl annotate deployment myapp -n prod \
+  git-commit="c1a13166bf8f835fb6633f0ce675db6f69cfbbce" \
+  pipeline-run="<REAL_GITHUB_ACTIONS_RUN_URL>" \
+  owner="devops-team" ticket="OPS-123" --overwrite
+kubectl get events -n prod --sort-by=.metadata.creationTimestamp
+kubectl describe deployment myapp -n prod
+```
 
-In our `ci.yml`:
+Expected RBAC decisions for the viewer account are `yes` for listing pods and `no` for deleting pods, subject to the cluster's actual authorization policy. The audit annotations are examples and **must** be replaced with real references before claiming traceability.
 
-1. The `build-test` job runs **Install → Lint (seconds) → Tests → Docker build (slowest)**. If lint fails, the tests and the image build do not run at all.
-2. The `publish` job has `needs: build-test`, so an image is **never published** if any check failed.
-3. `build-test` is a **required status check** on `main`, so a red pipeline also blocks the Pull Request from being merged.
+### Optional API server audit bonus
+
+See [docs/audit-guide.md](docs/audit-guide.md) for a dedicated kind cluster configuration and an audit-log inspection procedure.
+
+## Answers and evidence
+
+- [ANSWERS.md](ANSWERS.md): all eight theory answers.
+- [docs/deployment-guide.md](docs/deployment-guide.md): evidence collection checklist.
+- [evidence/README.md](evidence/README.md): evidence inventory (populate after execution).
+
+No execution results are claimed by this repository unless captured in `evidence/`.
+
+## Automated checks
+
+The `Validate Kubernetes manifests` workflow renders all three overlays and RBAC, checks expected namespaces, replicas, selectors, ports, probes, resource policies and configuration references, then checks Kubernetes resource schemas with kubeconform. Rendered manifests are uploaded as a CI artifact. This is static validation; it does **not** prove image availability or successful deployment.
+
+```bash
+python3 -m pip install PyYAML==6.0.2
+python3 scripts/validate_manifests.py  # requires kubectl
+```
+
+The real image reference must be confirmed from the Lab 1 GHCR package before runtime deployment. The placeholder is deliberately not presented as a working image.
