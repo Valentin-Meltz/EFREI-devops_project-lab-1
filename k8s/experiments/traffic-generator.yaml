@@ -1,0 +1,30 @@
+# Part 5.2: in-cluster client that calls GET http://myapp/ every 0.2 s and logs
+# the HTTP status and the version that answered. Used to prove that a rolling
+# update (and a failed one) causes no downtime. Disposable, dev only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traffic
+  namespace: dev
+  labels:
+    role: traffic
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          while true; do
+            out=$(curl -s -m 2 -w ' HTTP %{http_code}' http://myapp/) || out="$out FAILED"
+            echo "$(date -u +%H:%M:%S) $out"
+            sleep 0.2
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi

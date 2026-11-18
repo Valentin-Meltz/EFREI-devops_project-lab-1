@@ -1,0 +1,121 @@
+### 03 - Probes, resources and configuration
+### 2026-11-18T13:45:30Z | context: kind-devops-lab
+
+# 3.1 / 3.2 Probes and resources as seen by the cluster
+
+$ kubectl describe pod myapp-6c88f95f57-ckjhw -n dev | sed -n '/^Containers:/,/^Conditions:/p'
+Containers:
+  myapp:
+    Container ID:   containerd://17261ad0731c15cd8bbacfd4bcb555d6444fa297d42b4df599411cd42e09eb8c
+    Image:          ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+    Image ID:       ghcr.io/valentin-meltz/efrei-devops_project-lab-1@sha256:d80cb6acb43aa49ffbb343a29c1e147eff8dc9564e14ee1b24e8d0641dbb4c08
+    Port:           3000/TCP (http)
+    Host Port:      0/TCP (http)
+    State:          Running
+      Started:      Wed, 18 Nov 2026 14:44:14 +0100
+    Ready:          True
+    Restart Count:  0
+    Limits:
+      cpu:     500m
+      memory:  256Mi
+    Requests:
+      cpu:      100m
+      memory:   128Mi
+    Liveness:   http-get http://:http/health delay=10s timeout=1s period=10s #success=1 #failure=3
+    Readiness:  http-get http://:http/health delay=2s timeout=1s period=5s #success=1 #failure=3
+    Environment:
+      APP_ENV:  <set to the key 'APP_ENV' of config map 'myapp-config'>  Optional: false
+      API_KEY:  <set to the key 'API_KEY' in secret 'myapp-secret'>      Optional: false
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-wp2h4 (ro)
+Conditions:
+
+# 3.3 / 3.4 APP_ENV from the ConfigMap, API_KEY from the Secret (the app only reports whether it is set)
+
+$ kubectl exec myapp-6c88f95f57-ckjhw -n dev -- printenv APP_ENV
+dev
+
+$ kubectl exec myapp-6c88f95f57-ckjhw -n dev -- sh -c 'test -n "$API_KEY" && echo "API_KEY is set (${#API_KEY} chars)"'
+API_KEY is set (8 chars)
+
+$ kubectl exec myapp-6c88f95f57-ckjhw -n dev -- wget -qO- http://127.0.0.1:3000/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"dev","apiKeyConfigured":true,"pod":"myapp-6c88f95f57-ckjhw"}
+
+# Q4: Secret data is only base64-encoded; anyone allowed to read the Secret can decode it (fake demo key)
+
+$ kubectl get secret myapp-secret -n dev -o jsonpath='{.type} {.data}'; echo
+Opaque {"API_KEY":"Y2hhbmdlbWU="}
+
+$ kubectl get secret myapp-secret -n dev -o jsonpath='{.data.API_KEY}' | base64 -d; echo
+changeme
+
+# 3.5 Drill: same app with both probes on /broken (k8s/experiments/broken-probe)
+
+$ kubectl apply -k k8s/experiments/broken-probe
+configmap/myapp-config-broken-probe-6m894k5c89 created
+service/myapp-broken-probe created
+deployment.apps/myapp-broken-probe created
+
+# Waiting for the liveness probe to restart the container at least once
+
+$ kubectl wait pod -l app=myapp-broken-probe -n dev --for=jsonpath='{.status.containerStatuses[0].restartCount}'=1 --timeout=420s
+pod/myapp-broken-probe-59ffc74b-gmmdg condition met
+
+$ kubectl get pods -n dev -l app=myapp-broken-probe
+NAME                                READY   STATUS    RESTARTS     AGE
+myapp-broken-probe-59ffc74b-gmmdg   0/1     Running   1 (0s ago)   35s
+
+$ kubectl describe pod myapp-broken-probe-59ffc74b-gmmdg -n dev | sed -n '/^Conditions:/,$p'
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       False 
+  ContainersReady             False 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-npdhk:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   Burstable
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age               From               Message
+  ----     ------     ----              ----               -------
+  Normal   Scheduled  35s               default-scheduler  Successfully assigned dev/myapp-broken-probe-59ffc74b-gmmdg to devops-lab-control-plane
+  Warning  Unhealthy  6s (x3 over 26s)  kubelet            Liveness probe failed: HTTP probe failed with statuscode: 404
+  Normal   Killing    6s                kubelet            Container myapp failed liveness probe, will be restarted
+  Normal   Pulled     1s (x2 over 36s)  kubelet            Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+  Normal   Created    1s (x2 over 36s)  kubelet            Container created
+  Normal   Started    1s (x2 over 36s)  kubelet            Container started
+  Warning  Unhealthy  1s (x7 over 31s)  kubelet            Readiness probe failed: HTTP probe failed with statuscode: 404
+
+# Readiness fails: the pod is listed in the EndpointSlice but marked not ready, so it gets no traffic
+
+$ kubectl get endpointslices -n dev -l kubernetes.io/service-name=myapp-broken-probe -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]} {.targetRef.name} ready={.conditions.ready}{"\n"}{end}'
+10.244.0.24 myapp-broken-probe-59ffc74b-gmmdg ready=false
+
+$ kubectl exec deploy/myapp -n dev -- wget -qO- -T 3 http://myapp-broken-probe/health; echo
+wget: can't connect to remote host (10.96.109.31): Connection refused
+command terminated with exit code 1
+
+
+# The real app is untouched: its three pods are ready and answer through its Service
+
+$ kubectl get endpointslices -n dev -l kubernetes.io/service-name=myapp -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]} {.targetRef.name} ready={.conditions.ready}{"\n"}{end}'
+10.244.0.19 myapp-6c88f95f57-wgzhh ready=true
+10.244.0.17 myapp-6c88f95f57-ckjhw ready=true
+10.244.0.20 myapp-6c88f95f57-glnsk ready=true
+
+$ kubectl exec deploy/myapp -n dev -- wget -qO- -T 3 http://myapp/health; echo
+OK
+
+$ kubectl delete -k k8s/experiments/broken-probe
+configmap "myapp-config-broken-probe-6m894k5c89" deleted from dev namespace
+service "myapp-broken-probe" deleted from dev namespace
+deployment.apps "myapp-broken-probe" deleted from dev namespace

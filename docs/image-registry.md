@@ -1,23 +1,24 @@
-# Lab 1 container image provenance
+# Container images (GHCR)
 
-Source repository: `Valentin-Meltz/EFREI-devops_project-lab-1`
+Package: `ghcr.io/valentin-meltz/efrei-devops_project-lab-1` — **private**
+(`https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pkgs/container/efrei-devops_project-lab-1`).
 
-Source commit on `main` (merge PR #5): `c1a13166bf8f835fb6633f0ce675db6f69cfbbce`
+The `publish` job of `.github/workflows/ci.yml` runs on every push to `main` (that is, on every merged PR). It builds `linux/amd64` and `linux/arm64` with Buildx/QEMU, passes the commit SHA as `GIT_SHA` (returned by `GET /` and set as the `org.opencontainers.image.revision` label), and tags the image with the full commit SHA. Tags are never reused, so a tag identifies exactly one commit.
 
-Configured image (base + all three overlays):
+| Release | Tag (merge commit) | PR / reviewer | CI run | Used by |
+| --- | --- | --- | --- | --- |
+| v1.0.0 | `ba33ff148f57ad68f209a683faeb358a1389c4df` | #8, approved by Z3rbe | 44285404917 | base, staging, prod |
+| v1.1.0 | `982483e48711ca36531464c164ad73718640ee22` | #9, approved by Z3rbe | 44314886057 | dev |
 
-```text
-ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce
-```
+Older tags (`c1a1316…`, `109fec2…`, `1e10231…`) are amd64-only and fail on an arm64 node with `no match for platform in manifest`; they are not used.
 
-The commit was identified from the Git history supplied for Lab 1. **It has not been confirmed that GHCR contains this tag or that the package is publicly accessible.** The package is located at `https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pkgs/container/efrei-devops_project-lab-1`.
+## Pulling from the cluster
 
-Before deployment, verify the tag on the package Versions page or authenticate and run:
+The package is private, so every namespace that runs `myapp` needs the `ghcr-pull` secret (`kubernetes.io/dockerconfigjson`). Use a classic token with the single scope `read:packages` (GHCR does not accept fine-grained tokens), stored outside the repository, and run `scripts/create_pull_secret.sh`. The script builds the docker config with shell builtins and pipes it to `kubectl` on stdin, so the token never appears on a command line or in an output. Manifests only reference the secret by name.
 
-```bash
-docker manifest inspect ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce
-```
+## Releasing a new version
 
-If GHCR is private, configure an `imagePullSecret` in each namespace; never commit registry credentials.
-
-The Deployment and Pod template both carry `lab.efrei.io/git-commit` set to the image tag's SHA. The actual GitHub Actions run URL and PR reviewer cannot be derived from the SHA alone; obtain them from the original workflow and PR and add only verified values. A new image for a rolling update must use its own new SHA and matching traceability annotations.
+1. Merge a reviewed PR to `main`; wait for the `publish` job.
+2. In the target overlay, set `images[].newTag` to the merge commit SHA **and** update the release annotations (`change-cause`, `release`, `git-commit`, `pull-request`, `pipeline-run`) with a patch, as `k8s/overlays/dev` does for v1.1.0.
+3. `python3 scripts/validate_manifests.py` fails if `git-commit` does not match the tag.
+4. `kubectl diff -k k8s/overlays/<env>`, then `kubectl apply -k k8s/overlays/<env>`.

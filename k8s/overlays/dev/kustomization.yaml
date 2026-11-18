@@ -7,6 +7,7 @@ labels:
   - pairs:
       env: dev
     includeSelectors: false
+    includeTemplates: true
 replicas:
   - name: myapp
     count: 3
@@ -14,6 +15,29 @@ configMapGenerator:
   - name: myapp-config
     literals:
       - APP_ENV=dev
+# dev runs release v1.1.0 ahead of staging and prod (part 5.1). The image tag
+# and the traceability annotations are changed together.
 images:
   - name: ghcr.io/valentin-meltz/efrei-devops_project-lab-1
-    newTag: c1a13166bf8f835fb6633f0ce675db6f69cfbbce
+    newTag: 982483e48711ca36531464c164ad73718640ee22
+patches:
+  - target:
+      kind: Deployment
+      name: myapp
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp
+        annotations:
+          kubernetes.io/change-cause: "release v1.1.0 (982483e, PR #9, run 44314886057)"
+          lab.efrei.io/release: v1.1.0
+          lab.efrei.io/git-commit: "982483e48711ca36531464c164ad73718640ee22"
+          lab.efrei.io/pull-request: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/9"
+          lab.efrei.io/pipeline-run: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44314886057"
+      spec:
+        template:
+          metadata:
+            annotations:
+              lab.efrei.io/release: v1.1.0
+              lab.efrei.io/git-commit: "982483e48711ca36531464c164ad73718640ee22"

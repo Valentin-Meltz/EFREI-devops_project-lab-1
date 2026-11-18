@@ -1,0 +1,204 @@
+### 06 - Audit and traceability
+### 2026-11-18T13:52:11Z | context: kind-devops-lab
+
+# 6.1 Release annotations on the prod Deployment. They come from k8s/base/deployment.yaml
+
+# (declarative, reviewed in a PR), not from a manual kubectl annotate on the live object
+
+$ kubectl get deploy myapp -n prod -o go-template='{{range $k, $v := .metadata.annotations}}{{$k}}={{$v}}{{"\n"}}{{end}}' | grep -v last-applied-configuration
+deployment.kubernetes.io/revision=1
+
+kubernetes.io/change-cause=release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+lab.efrei.io/git-commit=ba33ff148f57ad68f209a683faeb358a1389c4df
+lab.efrei.io/owner=devops-team
+lab.efrei.io/pipeline-run=https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917
+lab.efrei.io/pull-request=https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8
+lab.efrei.io/release=v1.0.0
+lab.efrei.io/source-repository=https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1
+lab.efrei.io/ticket=https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7
+
+# Q7: from a running production pod back to the image, commit, PR, reviewer and pipeline run
+
+$ kubectl get pod myapp-868cbb4c55-2nb65 -n prod -o custom-columns='POD:.metadata.name,OWNER:.metadata.ownerReferences[0].name,IMAGE:.spec.containers[0].image'
+POD                      OWNER              IMAGE
+myapp-868cbb4c55-2nb65   myapp-868cbb4c55   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+
+$ kubectl get pod myapp-868cbb4c55-2nb65 -n prod -o jsonpath='{.status.containerStatuses[0].imageID}'; echo
+ghcr.io/valentin-meltz/efrei-devops_project-lab-1@sha256:d80cb6acb43aa49ffbb343a29c1e147eff8dc9564e14ee1b24e8d0641dbb4c08
+
+$ kubectl get rs myapp-868cbb4c55 -n prod -o custom-columns='REPLICASET:.metadata.name,OWNER:.metadata.ownerReferences[0].name,REVISION:.metadata.annotations.deployment\.kubernetes\.io/revision'
+REPLICASET         OWNER   REVISION
+myapp-868cbb4c55   myapp   1
+
+$ kubectl get pod myapp-868cbb4c55-2nb65 -n prod -o go-template='{{range $k, $v := .metadata.annotations}}{{$k}}={{$v}}{{"\n"}}{{end}}'
+lab.efrei.io/git-commit=ba33ff148f57ad68f209a683faeb358a1389c4df
+lab.efrei.io/release=v1.0.0
+
+# The image itself reports the commit it was built from
+
+$ kubectl exec myapp-868cbb4c55-2nb65 -n prod -- wget -qO- http://127.0.0.1:3000/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"prod","apiKeyConfigured":true,"pod":"myapp-868cbb4c55-2nb65"}
+
+# GitHub: pull request and reviews for that commit, then the CI run that published the image
+
+$ gh api repos/Valentin-Meltz/EFREI-devops_project-lab-1/commits/ba33ff148f57ad68f209a683faeb358a1389c4df/pulls --jq '.[] | "PR #\(.number) \(.title) (\(.html_url))"'
+PR #8 Release v1: multi-arch image and release info endpoint (https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8)
+
+$ gh pr view 8 -R Valentin-Meltz/EFREI-devops_project-lab-1 --json author,reviews,mergedBy,mergedAt,mergeCommit --jq '"author=\(.author.login) merged_by=\(.mergedBy.login) merged_at=\(.mergedAt) merge_commit=\(.mergeCommit.oid)", (.reviews[] | "review: \(.author.login) \(.state) \(.submittedAt)")'
+author=Valentin-Meltz merged_by=Z3rbe merged_at=2026-11-18T10:26:16Z merge_commit=ba33ff148f57ad68f209a683faeb358a1389c4df
+review: Z3rbe APPROVED 2026-11-18T10:25:54Z
+
+$ gh run list -R Valentin-Meltz/EFREI-devops_project-lab-1 --commit ba33ff148f57ad68f209a683faeb358a1389c4df --json databaseId,workflowName,event,conclusion,url --jq '.[] | "\(.workflowName) \(.event) \(.conclusion) \(.url)"'
+CI push success https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917
+
+$ gh run view 44285404917 -R Valentin-Meltz/EFREI-devops_project-lab-1 --json jobs --jq '.jobs[] | "job \(.name): \(.conclusion)"'
+job build-test: success
+job publish: success
+
+# 6.2 Reconstruct recent changes from events and describe
+
+$ kubectl get events -n prod --sort-by=.metadata.creationTimestamp
+LAST SEEN   TYPE     REASON              OBJECT                        MESSAGE
+6m3s        Normal   Scheduled           pod/myapp-868cbb4c55-fhbxh    Successfully assigned prod/myapp-868cbb4c55-fhbxh to devops-lab-control-plane
+6m4s        Normal   ScalingReplicaSet   deployment/myapp              Scaled up replica set myapp-868cbb4c55 from 0 to 5
+6m4s        Normal   SuccessfulCreate    replicaset/myapp-868cbb4c55   Created pod: myapp-868cbb4c55-qnpsk
+6m4s        Normal   SuccessfulCreate    replicaset/myapp-868cbb4c55   Created pod: myapp-868cbb4c55-fhbxh
+6m3s        Normal   Scheduled           pod/myapp-868cbb4c55-blcd8    Successfully assigned prod/myapp-868cbb4c55-blcd8 to devops-lab-control-plane
+6m4s        Normal   SuccessfulCreate    replicaset/myapp-868cbb4c55   Created pod: myapp-868cbb4c55-blcd8
+6m3s        Normal   Scheduled           pod/myapp-868cbb4c55-2nb65    Successfully assigned prod/myapp-868cbb4c55-2nb65 to devops-lab-control-plane
+6m4s        Normal   SuccessfulCreate    replicaset/myapp-868cbb4c55   Created pod: myapp-868cbb4c55-cj24q
+6m3s        Normal   Scheduled           pod/myapp-868cbb4c55-cj24q    Successfully assigned prod/myapp-868cbb4c55-cj24q to devops-lab-control-plane
+6m4s        Normal   SuccessfulCreate    replicaset/myapp-868cbb4c55   Created pod: myapp-868cbb4c55-2nb65
+6m3s        Normal   Scheduled           pod/myapp-868cbb4c55-qnpsk    Successfully assigned prod/myapp-868cbb4c55-qnpsk to devops-lab-control-plane
+6m3s        Normal   Created             pod/myapp-868cbb4c55-blcd8    Container created
+6m3s        Normal   Created             pod/myapp-868cbb4c55-qnpsk    Container created
+6m3s        Normal   Pulled              pod/myapp-868cbb4c55-fhbxh    Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+6m3s        Normal   Created             pod/myapp-868cbb4c55-fhbxh    Container created
+6m3s        Normal   Started             pod/myapp-868cbb4c55-fhbxh    Container started
+6m3s        Normal   Created             pod/myapp-868cbb4c55-cj24q    Container created
+6m3s        Normal   Pulled              pod/myapp-868cbb4c55-qnpsk    Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+6m3s        Normal   Started             pod/myapp-868cbb4c55-cj24q    Container started
+6m3s        Normal   Started             pod/myapp-868cbb4c55-qnpsk    Container started
+6m3s        Normal   Pulled              pod/myapp-868cbb4c55-cj24q    Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+6m3s        Normal   Started             pod/myapp-868cbb4c55-blcd8    Container started
+6m3s        Normal   Pulled              pod/myapp-868cbb4c55-blcd8    Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+6m3s        Normal   Started             pod/myapp-868cbb4c55-2nb65    Container started
+6m3s        Normal   Created             pod/myapp-868cbb4c55-2nb65    Container created
+6m3s        Normal   Pulled              pod/myapp-868cbb4c55-2nb65    Container image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df" already present on machine and can be accessed by the pod
+
+$ kubectl get events -n dev --sort-by=.metadata.creationTimestamp --field-selector involvedObject.kind=Deployment
+LAST SEEN   TYPE     REASON              OBJECT             MESSAGE
+2m14s       Normal   ScalingReplicaSet   deployment/myapp   Scaled up replica set myapp-b57fb64 from 0 to 3
+2m7s        Normal   ScalingReplicaSet   deployment/myapp   Scaled up replica set myapp-6965555f7f from 0 to 1
+2m1s        Normal   ScalingReplicaSet   deployment/myapp   Scaled down replica set myapp-b57fb64 from 3 to 2
+2m1s        Normal   ScalingReplicaSet   deployment/myapp   Scaled up replica set myapp-6965555f7f from 1 to 2
+115s        Normal   ScalingReplicaSet   deployment/myapp   Scaled down replica set myapp-b57fb64 from 2 to 1
+115s        Normal   ScalingReplicaSet   deployment/myapp   Scaled up replica set myapp-6965555f7f from 2 to 3
+109s        Normal   ScalingReplicaSet   deployment/myapp   Scaled down replica set myapp-b57fb64 from 1 to 0
+103s        Normal   ScalingReplicaSet   deployment/myapp   Scaled up replica set myapp-6d4546547 from 0 to 1
+42s         Normal   ScalingReplicaSet   deployment/myapp   Scaled down replica set myapp-6d4546547 from 1 to 0
+
+$ kubectl describe deployment myapp -n dev | sed -n '/^Annotations:/,/^Selector:/p;/^OldReplicaSets:/,$p'
+Annotations:            deployment.kubernetes.io/revision: 4
+                        kubernetes.io/change-cause: release v1.1.0 (982483e, PR #9, run 44314886057)
+                        lab.efrei.io/git-commit: 982483e48711ca36531464c164ad73718640ee22
+                        lab.efrei.io/owner: devops-team
+                        lab.efrei.io/pipeline-run: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44314886057
+                        lab.efrei.io/pull-request: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/9
+                        lab.efrei.io/release: v1.1.0
+                        lab.efrei.io/source-repository: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1
+                        lab.efrei.io/ticket: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7
+Selector:               app=myapp
+OldReplicaSets:  myapp-b57fb64 (0/0 replicas created), myapp-6d4546547 (0/0 replicas created)
+NewReplicaSet:   myapp-6965555f7f (3/3 replicas created)
+Events:
+  Type    Reason             Age    From                   Message
+  ----    ------             ----   ----                   -------
+  Normal  ScalingReplicaSet  2m14s  deployment-controller  Scaled up replica set myapp-b57fb64 from 0 to 3
+  Normal  ScalingReplicaSet  2m7s   deployment-controller  Scaled up replica set myapp-6965555f7f from 0 to 1
+  Normal  ScalingReplicaSet  2m1s   deployment-controller  Scaled down replica set myapp-b57fb64 from 3 to 2
+  Normal  ScalingReplicaSet  2m1s   deployment-controller  Scaled up replica set myapp-6965555f7f from 1 to 2
+  Normal  ScalingReplicaSet  115s   deployment-controller  Scaled down replica set myapp-b57fb64 from 2 to 1
+  Normal  ScalingReplicaSet  115s   deployment-controller  Scaled up replica set myapp-6965555f7f from 2 to 3
+  Normal  ScalingReplicaSet  109s   deployment-controller  Scaled down replica set myapp-b57fb64 from 1 to 0
+  Normal  ScalingReplicaSet  103s   deployment-controller  Scaled up replica set myapp-6d4546547 from 0 to 1
+  Normal  ScalingReplicaSet  42s    deployment-controller  Scaled down replica set myapp-6d4546547 from 1 to 0
+
+$ kubectl rollout history deployment/myapp -n dev
+deployment.apps/myapp 
+REVISION  CHANGE-CAUSE
+1         release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+3         drill: broken image tag does-not-exist
+4         release v1.1.0 (982483e, PR #9, run 44314886057)
+
+
+$ kubectl get rs -n dev -l app=myapp -o custom-columns='REPLICASET:.metadata.name,REVISION:.metadata.annotations.deployment\.kubernetes\.io/revision,DESIRED:.spec.replicas,IMAGE:.spec.template.spec.containers[0].image,CHANGE-CAUSE:.metadata.annotations.kubernetes\.io/change-cause'
+REPLICASET         REVISION   DESIRED   IMAGE                                                                                        CHANGE-CAUSE
+myapp-6965555f7f   4          3         ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22   release v1.1.0 (982483e, PR #9, run 44314886057)
+myapp-6d4546547    3          0         ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist                             drill: broken image tag does-not-exist
+myapp-b57fb64      1          0         ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df   release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+
+# 6.3 Read-only viewer service account (k8s/rbac)
+
+$ kubectl apply -k k8s/rbac
+serviceaccount/viewer unchanged
+role.rbac.authorization.k8s.io/pod-reader unchanged
+rolebinding.rbac.authorization.k8s.io/viewer-binding unchanged
+
+$ kubectl get serviceaccount,role,rolebinding -n dev
+NAME                     AGE
+serviceaccount/default   21h
+serviceaccount/viewer    26s
+
+NAME                                        CREATED AT
+role.rbac.authorization.k8s.io/pod-reader   2026-11-18T13:51:54Z
+
+NAME                                                   ROLE              AGE
+rolebinding.rbac.authorization.k8s.io/viewer-binding   Role/pod-reader   26s
+
+$ kubectl auth can-i list pods -n dev --as=system:serviceaccount:dev:viewer
+yes
+
+$ kubectl auth can-i get pods -n dev --as=system:serviceaccount:dev:viewer
+yes
+
+$ kubectl auth can-i watch pods -n dev --as=system:serviceaccount:dev:viewer
+yes
+
+$ kubectl auth can-i delete pods -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i create pods -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i get pods --subresource=log -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i get secrets -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i list deployments -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i patch deployments -n dev --as=system:serviceaccount:dev:viewer
+no
+
+$ kubectl auth can-i list pods -n prod --as=system:serviceaccount:dev:viewer
+no
+
+# Real requests made as the viewer (server-side dry-run for the delete)
+
+$ kubectl get pods -n dev --as=system:serviceaccount:dev:viewer
+NAME                     READY   STATUS    RESTARTS   AGE
+myapp-6965555f7f-2qksl   1/1     Running   0          2m2s
+myapp-6965555f7f-4xl9g   1/1     Running   0          116s
+myapp-6965555f7f-qk6qz   1/1     Running   0          2m8s
+
+$ kubectl delete pod myapp-6965555f7f-2qksl -n dev --dry-run=server --as=system:serviceaccount:dev:viewer
+Error from server (Forbidden): pods "myapp-6965555f7f-2qksl" is forbidden: User "system:serviceaccount:dev:viewer" cannot delete resource "pods" in API group "" in the namespace "dev"
+
+$ kubectl get secrets -n dev --as=system:serviceaccount:dev:viewer
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:dev:viewer" cannot list resource "secrets" in API group "" in the namespace "dev"
+
+$ kubectl get pods -n prod --as=system:serviceaccount:dev:viewer
+Error from server (Forbidden): pods is forbidden: User "system:serviceaccount:dev:viewer" cannot list resource "pods" in API group "" in the namespace "prod"

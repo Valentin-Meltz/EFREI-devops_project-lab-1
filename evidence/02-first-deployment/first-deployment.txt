@@ -1,0 +1,123 @@
+### 02 - First deployment (base manifests in dev)
+### 2026-11-18T13:44:13Z | context: kind-devops-lab
+
+# ConfigMap and fake Secret created out of band (never committed); ghcr-pull already exists
+
+$ kubectl create configmap myapp-config --from-literal=APP_ENV=dev -n dev
+configmap/myapp-config created
+
+$ kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n dev
+secret/myapp-secret created
+
+$ kubectl get secret ghcr-pull -n dev
+NAME        TYPE                             DATA   AGE
+ghcr-pull   kubernetes.io/dockerconfigjson   1      4m43s
+
+# 2.1 Apply the base Deployment and Service (kustomization.yaml is not a cluster resource)
+
+$ kubectl apply -f k8s/base/deployment.yaml -f k8s/base/service.yaml -n dev
+deployment.apps/myapp created
+service/myapp created
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=420s
+Waiting for deployment "myapp" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 2 of 3 updated replicas are available...
+deployment "myapp" successfully rolled out
+
+# 2.2 Pods, Deployment and Service
+
+$ kubectl get all -n dev -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                       NOMINATED NODE   READINESS GATES
+pod/myapp-6c88f95f57-8pt98   1/1     Running   0          6s    10.244.0.18   devops-lab-control-plane   <none>           <none>
+pod/myapp-6c88f95f57-ckjhw   1/1     Running   0          6s    10.244.0.17   devops-lab-control-plane   <none>           <none>
+pod/myapp-6c88f95f57-wgzhh   1/1     Running   0          6s    10.244.0.19   devops-lab-control-plane   <none>           <none>
+
+NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE   SELECTOR
+service/myapp   ClusterIP   10.96.55.145   <none>        80/TCP    6s    app=myapp
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                                                       SELECTOR
+deployment.apps/myapp   3/3     3            3           6s    myapp        ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df   app=myapp
+
+NAME                               DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES                                                                                       SELECTOR
+replicaset.apps/myapp-6c88f95f57   3         3         3       6s    myapp        ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df   app=myapp,pod-template-hash=6c88f95f57
+
+# 2.3 Reach the application through kubectl port-forward
+
+$ curl -s -i --retry 20 --retry-connrefused --retry-delay 1 http://localhost:8080/health
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 2
+Date: Wed, 18 Nov 2026 13:44:21 GMT
+Connection: keep-alive
+Keep-Alive: timeout=72
+
+OK
+$ curl -s http://localhost:8080/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"dev","apiKeyConfigured":true,"pod":"myapp-6c88f95f57-8pt98"}
+
+# 2.4 Delete one pod and watch the ReplicaSet replace it
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS    RESTARTS   AGE
+myapp-6c88f95f57-8pt98   1/1     Running   0          8s
+myapp-6c88f95f57-ckjhw   1/1     Running   0          8s
+myapp-6c88f95f57-wgzhh   1/1     Running   0          8s
+
+$ kubectl delete pod myapp-6c88f95f57-8pt98 -n dev --wait=false
+pod "myapp-6c88f95f57-8pt98" deleted from dev namespace
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS              RESTARTS   AGE
+myapp-6c88f95f57-8pt98   1/1     Terminating         0          8s
+myapp-6c88f95f57-ckjhw   1/1     Running             0          8s
+myapp-6c88f95f57-glnsk   0/1     ContainerCreating   0          0s
+myapp-6c88f95f57-wgzhh   1/1     Running             0          8s
+
+$ kubectl wait deployment/myapp -n dev --for=jsonpath='{.status.readyReplicas}'=3 --timeout=120s
+deployment.apps/myapp condition met
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS    RESTARTS   AGE
+myapp-6c88f95f57-ckjhw   1/1     Running   0          13s
+myapp-6c88f95f57-glnsk   1/1     Running   0          5s
+myapp-6c88f95f57-wgzhh   1/1     Running   0          13s
+
+$ kubectl get events -n dev --field-selector involvedObject.kind=ReplicaSet --sort-by=.lastTimestamp | tail -n 5
+LAST SEEN   TYPE     REASON             OBJECT                        MESSAGE
+13s         Normal   SuccessfulCreate   replicaset/myapp-6c88f95f57   Created pod: myapp-6c88f95f57-8pt98
+13s         Normal   SuccessfulCreate   replicaset/myapp-6c88f95f57   Created pod: myapp-6c88f95f57-wgzhh
+13s         Normal   SuccessfulCreate   replicaset/myapp-6c88f95f57   Created pod: myapp-6c88f95f57-ckjhw
+5s          Normal   SuccessfulCreate   replicaset/myapp-6c88f95f57   Created pod: myapp-6c88f95f57-glnsk
+
+# 2.5 Scale to 5 replicas, then back to 3
+
+$ kubectl scale deployment myapp --replicas=5 -n dev
+deployment.apps/myapp scaled
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=120s
+Waiting for deployment "myapp" rollout to finish: 3 of 5 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 4 of 5 updated replicas are available...
+deployment "myapp" successfully rolled out
+
+$ kubectl get deployment myapp -n dev
+NAME    READY   UP-TO-DATE   AVAILABLE   AGE
+myapp   5/5     5            5           19s
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS    RESTARTS   AGE
+myapp-6c88f95f57-ckjhw   1/1     Running   0          19s
+myapp-6c88f95f57-glnsk   1/1     Running   0          11s
+myapp-6c88f95f57-gn44w   1/1     Running   0          6s
+myapp-6c88f95f57-kc4xg   1/1     Running   0          6s
+myapp-6c88f95f57-wgzhh   1/1     Running   0          19s
+
+$ kubectl scale deployment myapp --replicas=3 -n dev
+deployment.apps/myapp scaled
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=120s
+deployment "myapp" successfully rolled out
+
+$ kubectl get deployment myapp -n dev
+NAME    READY   UP-TO-DATE   AVAILABLE   AGE
+myapp   3/3     3            3           19s

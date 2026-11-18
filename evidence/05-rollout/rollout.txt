@@ -1,0 +1,210 @@
+### 05 - Rolling update and rollback (dev)
+### 2026-11-18T13:50:11Z | context: kind-devops-lab
+
+# State before the update
+
+$ kubectl rollout history deployment/myapp -n dev
+deployment.apps/myapp 
+REVISION  CHANGE-CAUSE
+1         release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+
+
+$ kubectl get deploy myapp -n dev -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+
+# Start the in-cluster traffic generator (k8s/experiments/traffic-generator.yaml)
+
+$ kubectl apply -f k8s/experiments/traffic-generator.yaml
+pod/traffic created
+
+$ kubectl wait --for=condition=Ready pod/traffic -n dev --timeout=120s
+pod/traffic condition met
+
+# 5.1 The dev overlay now pins v1.1.0: what will change
+
+$ kubectl diff -k k8s/overlays/dev
+diff -u -N /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/LIVE-3289061020/apps.v1.Deployment.dev.myapp /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/MERGED-1966895440/apps.v1.Deployment.dev.myapp
+--- /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/LIVE-3289061020/apps.v1.Deployment.dev.myapp	2026-11-18 14:50:12
++++ /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/MERGED-1966895440/apps.v1.Deployment.dev.myapp	2026-11-18 14:50:12
+@@ -5,16 +5,16 @@
+     deployment.kubernetes.io/revision: "1"
+     kubectl.kubernetes.io/last-applied-configuration: |
+       {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"kubernetes.io/change-cause":"release v1.0.0 (ba33ff1, PR #8, run 44285404917)","lab.efrei.io/git-commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","lab.efrei.io/owner":"devops-team","lab.efrei.io/pipeline-run":"https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917","lab.efrei.io/pull-request":"https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8","lab.efrei.io/release":"v1.0.0","lab.efrei.io/source-repository":"https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1","lab.efrei.io/ticket":"https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7"},"labels":{"app":"myapp","env":"dev"},"name":"myapp","namespace":"dev"},"spec":{"replicas":3,"revisionHistoryLimit":10,"selector":{"matchLabels":{"app":"myapp"}},"strategy":{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"lab.efrei.io/git-commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","lab.efrei.io/release":"v1.0.0"},"labels":{"app":"myapp","env":"dev"}},"spec":{"containers":[{"env":[{"name":"APP_ENV","valueFrom":{"configMapKeyRef":{"key":"APP_ENV","name":"myapp-config-6m894k5c89"}}},{"name":"API_KEY","valueFrom":{"secretKeyRef":{"key":"API_KEY","name":"myapp-secret"}}}],"image":"ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df","imagePullPolicy":"IfNotPresent","lifecycle":{"preStop":{"sleep":{"seconds":5}}},"livenessProbe":{"failureThreshold":3,"httpGet":{"path":"/health","port":"http"},"initialDelaySeconds":10,"periodSeconds":10},"name":"myapp","ports":[{"containerPort":3000,"name":"http"}],"readinessProbe":{"failureThreshold":3,"httpGet":{"path":"/health","port":"http"},"initialDelaySeconds":2,"periodSeconds":5},"resources":{"limits":{"cpu":"500m","memory":"256Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}}],"imagePullSecrets":[{"name":"ghcr-pull"}]}}}}
+-    kubernetes.io/change-cause: 'release v1.0.0 (ba33ff1, PR #8, run 44285404917)'
+-    lab.efrei.io/git-commit: ba33ff148f57ad68f209a683faeb358a1389c4df
++    kubernetes.io/change-cause: 'release v1.1.0 (982483e, PR #9, run 44314886057)'
++    lab.efrei.io/git-commit: 982483e48711ca36531464c164ad73718640ee22
+     lab.efrei.io/owner: devops-team
+-    lab.efrei.io/pipeline-run: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917
+-    lab.efrei.io/pull-request: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8
+-    lab.efrei.io/release: v1.0.0
++    lab.efrei.io/pipeline-run: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44314886057
++    lab.efrei.io/pull-request: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/9
++    lab.efrei.io/release: v1.1.0
+     lab.efrei.io/source-repository: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1
+     lab.efrei.io/ticket: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7
+   creationTimestamp: "2026-11-18T13:50:05Z"
+-  generation: 1
++  generation: 2
+   labels:
+     app: myapp
+     env: dev
+@@ -37,8 +37,8 @@
+   template:
+     metadata:
+       annotations:
+-        lab.efrei.io/git-commit: ba33ff148f57ad68f209a683faeb358a1389c4df
+-        lab.efrei.io/release: v1.0.0
++        lab.efrei.io/git-commit: 982483e48711ca36531464c164ad73718640ee22
++        lab.efrei.io/release: v1.1.0
+       labels:
+         app: myapp
+         env: dev
+@@ -55,7 +55,7 @@
+             secretKeyRef:
+               key: API_KEY
+               name: myapp-secret
+-        image: ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
++        image: ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22
+         imagePullPolicy: IfNotPresent
+         lifecycle:
+           preStop:
+
+$ kubectl apply -k k8s/overlays/dev
+configmap/myapp-config-6m894k5c89 unchanged
+service/myapp unchanged
+deployment.apps/myapp configured
+
+# 5.2 Watch the rollout, then wait until the old pods are fully gone
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=420s
+Waiting for deployment "myapp" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "myapp" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "myapp" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "myapp" rollout to finish: 1 old replicas are pending termination...
+deployment "myapp" successfully rolled out
+
+$ kubectl wait --for=delete pod -l app=myapp,pod-template-hash=b57fb64 -n dev --timeout=120s
+pod/myapp-b57fb64-k98p6 condition met
+
+$ kubectl get rs -n dev -l app=myapp -o wide
+NAME               DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES                                                                                       SELECTOR
+myapp-6965555f7f   3         3         3       24s   myapp        ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22   app=myapp,pod-template-hash=6965555f7f
+myapp-b57fb64      0         0         0       31s   myapp        ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df   app=myapp,pod-template-hash=b57fb64
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS    RESTARTS   AGE
+myapp-6965555f7f-2qksl   1/1     Running   0          18s
+myapp-6965555f7f-4xl9g   1/1     Running   0          12s
+myapp-6965555f7f-qk6qz   1/1     Running   0          24s
+
+# Traffic during the rolling update (full log: evidence/05-rollout/traffic.log)
+
+$ tail -n +1 evidence/05-rollout/traffic.log | awk '{n++} /HTTP 200/{ok++} /"version":"1.0.0"/{v0++} /"version":"1.1.0"/{v1++} END{printf "requests=%d ok=%d failed=%d served_by_v1.0.0=%d served_by_v1.1.0=%d\n", n, ok, n-ok, v0, v1}'
+requests=111 ok=111 failed=0 served_by_v1.0.0=57 served_by_v1.1.0=54
+
+$ grep -n -m1 '"version":"1.1.0"' evidence/05-rollout/traffic.log
+30:13:50:18 {"service":"myapp","version":"1.1.0","commit":"982483e48711ca36531464c164ad73718640ee22","environment":"dev","apiKeyConfigured":true,"pod":"myapp-6965555f7f-qk6qz"} HTTP 200
+
+# 5.3 Drill: deploy an image tag that does not exist
+
+$ kubectl set image deployment/myapp myapp=ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist -n dev
+deployment.apps/myapp image updated
+
+$ kubectl annotate deployment myapp -n dev 'kubernetes.io/change-cause=drill: broken image tag does-not-exist' --overwrite
+deployment.apps/myapp annotated
+
+# Expected: the rollout stalls and this command times out
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=60s
+Waiting for deployment "myapp" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS         RESTARTS   AGE
+myapp-6965555f7f-2qksl   1/1     Running        0          79s
+myapp-6965555f7f-4xl9g   1/1     Running        0          73s
+myapp-6965555f7f-qk6qz   1/1     Running        0          85s
+myapp-6d4546547-kltfb    0/1     ErrImagePull   0          61s
+
+$ kubectl get events -n dev --field-selector involvedObject.name=myapp-6d4546547-kltfb --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON      OBJECT                      MESSAGE
+60s         Normal    Scheduled   pod/myapp-6d4546547-kltfb   Successfully assigned dev/myapp-6d4546547-kltfb to devops-lab-control-plane
+16s         Normal    Pulling     pod/myapp-6d4546547-kltfb   Pulling image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist"
+15s         Warning   Failed      pod/myapp-6d4546547-kltfb   Failed to pull image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist": rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist": failed to resolve reference "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist": ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist: not found
+15s         Warning   Failed      pod/myapp-6d4546547-kltfb   Error: ErrImagePull
+0s          Normal    BackOff     pod/myapp-6d4546547-kltfb   Back-off pulling image "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:does-not-exist"
+0s          Warning   Failed      pod/myapp-6d4546547-kltfb   Error: ImagePullBackOff
+
+$ kubectl describe deployment myapp -n dev | sed -n '/^Replicas:/p;/^Conditions:/,/^OldReplicaSets:/p'
+Replicas:               3 desired | 1 updated | 4 total | 3 available | 1 unavailable
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    ReplicaSetUpdated
+OldReplicaSets:  myapp-b57fb64 (0/0 replicas created), myapp-6965555f7f (3/3 replicas created)
+
+# The three v1.1.0 pods stay Ready behind the Service
+
+$ kubectl get endpointslices -n dev -l kubernetes.io/service-name=myapp
+NAME          ADDRESSTYPE   PORTS   ENDPOINTS                                         AGE
+myapp-vb7k8   IPv4          3000    10.244.0.45,10.244.0.46,10.244.0.47 + 1 more...   5m22s
+
+# 5.4 Roll back and check the revision history
+
+$ kubectl rollout history deployment/myapp -n dev
+deployment.apps/myapp 
+REVISION  CHANGE-CAUSE
+1         release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+2         release v1.1.0 (982483e, PR #9, run 44314886057)
+3         drill: broken image tag does-not-exist
+
+
+$ kubectl rollout undo deployment/myapp -n dev
+deployment.apps/myapp rolled back
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=120s
+deployment "myapp" successfully rolled out
+
+$ kubectl rollout history deployment/myapp -n dev
+deployment.apps/myapp 
+REVISION  CHANGE-CAUSE
+1         release v1.0.0 (ba33ff1, PR #8, run 44285404917)
+3         drill: broken image tag does-not-exist
+4         release v1.1.0 (982483e, PR #9, run 44314886057)
+
+
+$ kubectl get deploy myapp -n dev -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22
+
+$ kubectl get pods -n dev -l app=myapp
+NAME                     READY   STATUS        RESTARTS   AGE
+myapp-6965555f7f-2qksl   1/1     Running       0          79s
+myapp-6965555f7f-4xl9g   1/1     Running       0          73s
+myapp-6965555f7f-qk6qz   1/1     Running       0          85s
+myapp-6d4546547-kltfb    0/1     Terminating   0          61s
+
+# Live state matches Git again (no output from kubectl diff means no drift)
+
+$ kubectl diff -k k8s/overlays/dev && echo 'no drift between k8s/overlays/dev and the cluster'
+no drift between k8s/overlays/dev and the cluster
+
+# Traffic during the failed rollout and the rollback
+
+$ tail -n +112 evidence/05-rollout/traffic.log | awk '{n++} /HTTP 200/{ok++} /"version":"1.0.0"/{v0++} /"version":"1.1.0"/{v1++} END{printf "requests=%d ok=%d failed=%d served_by_v1.0.0=%d served_by_v1.1.0=%d\n", n, ok, n-ok, v0, v1}'
+requests=259 ok=259 failed=0 served_by_v1.0.0=0 served_by_v1.1.0=259
+
+# Whole run
+
+$ tail -n +1 evidence/05-rollout/traffic.log | awk '{n++} /HTTP 200/{ok++} /"version":"1.0.0"/{v0++} /"version":"1.1.0"/{v1++} END{printf "requests=%d ok=%d failed=%d served_by_v1.0.0=%d served_by_v1.1.0=%d\n", n, ok, n-ok, v0, v1}'
+requests=370 ok=370 failed=0 served_by_v1.0.0=57 served_by_v1.1.0=313
+
+$ kubectl delete pod traffic -n dev --wait=false
+pod "traffic" deleted from dev namespace

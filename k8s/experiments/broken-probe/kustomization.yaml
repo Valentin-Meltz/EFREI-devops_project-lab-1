@@ -1,0 +1,34 @@
+# Part 3.5 drill: a disposable copy of the base with both probes pointing to a
+# path that does not exist. Deploy it next to the real app, observe it with
+# kubectl describe, then delete it. Never apply this to staging or prod.
+#   kubectl apply -k k8s/experiments/broken-probe
+#   kubectl delete -k k8s/experiments/broken-probe
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dev
+resources:
+  - ../../base
+nameSuffix: -broken-probe
+labels:
+  - pairs:
+      app: myapp-broken-probe
+    includeSelectors: true
+    includeTemplates: true
+replicas:
+  - name: myapp
+    count: 1
+configMapGenerator:
+  - name: myapp-config
+    literals:
+      - APP_ENV=dev
+patches:
+  - target:
+      kind: Deployment
+      name: myapp
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+        value: /broken
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/path
+        value: /broken

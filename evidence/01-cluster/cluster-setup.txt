@@ -1,0 +1,21 @@
+### 01 - Cluster setup
+### 2026-11-17T16:26:30Z | context: kind-devops-lab
+
+$ kind get clusters
+devops-lab
+
+$ kubectl cluster-info --context kind-devops-lab
+Kubernetes control plane is running at https://127.0.0.1:51803
+CoreDNS is running at https://127.0.0.1:51803/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.
+
+$ kubectl get nodes -o wide
+NAME                       STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+devops-lab-control-plane   Ready    control-plane   5m3s   v1.37.0   172.25.0.2    <none>        Debian GNU/Linux 13 (trixie)   6.10.14-linuxkit (arm64)   containerd://2.3.4
+
+$ kubectl get namespaces dev staging prod
+NAME      STATUS   AGE
+dev       Active   2m28s
+staging   Active   2m28s
+prod      Active   2m28s

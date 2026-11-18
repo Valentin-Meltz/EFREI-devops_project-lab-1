@@ -7,8 +7,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "rendered"
 OUT.mkdir(exist_ok=True)
-IMAGE = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce"
-COMMIT = "c1a13166bf8f835fb6633f0ce675db6f69cfbbce"
+REPOSITORY = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1"
+ANNOTATIONS = ("kubernetes.io/change-cause", "lab.efrei.io/owner", "lab.efrei.io/ticket",
+               "lab.efrei.io/release", "lab.efrei.io/git-commit",
+               "lab.efrei.io/pull-request", "lab.efrei.io/pipeline-run")
 
 
 def render(name, path):
@@ -39,9 +41,18 @@ for env, replicas in (("dev", 3), ("staging", 3), ("prod", 5)):
     assert svc["spec"]["ports"][0]["targetPort"] == "http"
     container = deploy["spec"]["template"]["spec"]["containers"][0]
     assert container["ports"][0]["containerPort"] == 3000
-    assert container["image"] == IMAGE
-    assert deploy["metadata"]["annotations"]["lab.efrei.io/git-commit"] == COMMIT
-    assert deploy["spec"]["template"]["metadata"]["annotations"]["lab.efrei.io/git-commit"] == COMMIT
+    # The image is pinned to a full commit SHA and the traceability annotations
+    # describe that same commit (they must be updated together with the tag).
+    repository, tag = container["image"].rsplit(":", 1)
+    assert repository == REPOSITORY and len(tag) == 40, container["image"]
+    annotations = deploy["metadata"]["annotations"]
+    assert all(annotations.get(key) for key in ANNOTATIONS), annotations
+    assert annotations["lab.efrei.io/git-commit"] == tag
+    assert tag[:7] in annotations["kubernetes.io/change-cause"]
+    template_annotations = deploy["spec"]["template"]["metadata"]["annotations"]
+    assert template_annotations["lab.efrei.io/git-commit"] == tag
+    assert template_annotations["lab.efrei.io/release"] == annotations["lab.efrei.io/release"]
+    assert deploy["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
     for probe in ("readinessProbe", "livenessProbe"):
         assert container[probe]["httpGet"] == {"path": "/health", "port": "http"}
     assert container["resources"]["requests"] and container["resources"]["limits"]
@@ -49,7 +60,8 @@ for env, replicas in (("dev", 3), ("staging", 3), ("prod", 5)):
     assert envvars["APP_ENV"]["configMapKeyRef"]["name"] == config["metadata"]["name"]
     assert envvars["API_KEY"]["secretKeyRef"] == {"name": "myapp-secret", "key": "API_KEY"}
     assert deploy["spec"]["strategy"]["rollingUpdate"]["maxUnavailable"] == 0
-    print(f"OK {env}: {replicas} replicas, correct ports, probes, config and Secret reference")
+    print(f"OK {env}: {replicas} replicas, {annotations['lab.efrei.io/release']} ({tag[:7]}), "
+          "probes, config, Secret and pull secret references")
 
 rbac = render("rbac", ROOT / "k8s" / "rbac")
 assert {o["kind"] for o in rbac} == {"Role", "RoleBinding", "ServiceAccount"}

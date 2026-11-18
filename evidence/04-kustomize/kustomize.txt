@@ -1,0 +1,284 @@
+### 04 - Multi-environment with Kustomize
+### 2026-11-18T13:46:14Z | context: kind-devops-lab
+
+# Remove the part 2 objects from dev: from now on dev is managed only by its overlay
+
+$ kubectl delete -f k8s/base/deployment.yaml -f k8s/base/service.yaml -n dev --ignore-not-found
+deployment.apps "myapp" deleted from dev namespace
+service "myapp" deleted from dev namespace
+
+$ kubectl delete configmap myapp-config -n dev --ignore-not-found
+configmap "myapp-config" deleted from dev namespace
+
+# Fake API key in staging and prod, created out of band (dev already has one)
+
+$ kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n staging --dry-run=client -o yaml | kubectl apply -f -
+secret/myapp-secret created
+
+$ kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n prod --dry-run=client -o yaml | kubectl apply -f -
+secret/myapp-secret created
+
+$ kubectl get secrets -A --field-selector metadata.name=ghcr-pull
+NAMESPACE   NAME        TYPE                             DATA   AGE
+dev         ghcr-pull   kubernetes.io/dockerconfigjson   1      6m44s
+prod        ghcr-pull   kubernetes.io/dockerconfigjson   1      6m44s
+staging     ghcr-pull   kubernetes.io/dockerconfigjson   1      6m44s
+
+# 4.2 Rendered prod overlay
+
+$ kubectl kustomize k8s/overlays/prod
+apiVersion: v1
+data:
+  APP_ENV: prod
+kind: ConfigMap
+metadata:
+  labels:
+    env: prod
+  name: myapp-config-t28bd96kb5
+  namespace: prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: myapp
+    env: prod
+  name: myapp
+  namespace: prod
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    app: myapp
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kubernetes.io/change-cause: 'release v1.0.0 (ba33ff1, PR #8, run 44285404917)'
+    lab.efrei.io/git-commit: ba33ff148f57ad68f209a683faeb358a1389c4df
+    lab.efrei.io/owner: devops-team
+    lab.efrei.io/pipeline-run: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917
+    lab.efrei.io/pull-request: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8
+    lab.efrei.io/release: v1.0.0
+    lab.efrei.io/source-repository: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1
+    lab.efrei.io/ticket: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7
+  labels:
+    app: myapp
+    env: prod
+  name: myapp
+  namespace: prod
+spec:
+  replicas: 5
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: myapp
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        lab.efrei.io/git-commit: ba33ff148f57ad68f209a683faeb358a1389c4df
+        lab.efrei.io/release: v1.0.0
+      labels:
+        app: myapp
+        env: prod
+    spec:
+      containers:
+      - env:
+        - name: APP_ENV
+          valueFrom:
+            configMapKeyRef:
+              key: APP_ENV
+              name: myapp-config-t28bd96kb5
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: API_KEY
+              name: myapp-secret
+        image: ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        name: myapp
+        ports:
+        - containerPort: 3000
+          name: http
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      imagePullSecrets:
+      - name: ghcr-pull
+
+# What changes between environments (rendered dev vs prod)
+
+$ diff <(kubectl kustomize k8s/overlays/dev) <(kubectl kustomize k8s/overlays/prod)
+3c3
+<   APP_ENV: dev
+---
+>   APP_ENV: prod
+7,9c7,9
+<     env: dev
+<   name: myapp-config-6m894k5c89
+<   namespace: dev
+---
+>     env: prod
+>   name: myapp-config-t28bd96kb5
+>   namespace: prod
+16c16
+<     env: dev
+---
+>     env: prod
+18c18
+<   namespace: dev
+---
+>   namespace: prod
+42c42
+<     env: dev
+---
+>     env: prod
+44c44
+<   namespace: dev
+---
+>   namespace: prod
+46c46
+<   replicas: 3
+---
+>   replicas: 5
+63c63
+<         env: dev
+---
+>         env: prod
+71c71
+<               name: myapp-config-6m894k5c89
+---
+>               name: myapp-config-t28bd96kb5
+
+# 4.3 Deploy each overlay to its namespace
+
+$ kubectl apply -k k8s/overlays/dev
+configmap/myapp-config-6m894k5c89 created
+service/myapp created
+deployment.apps/myapp created
+
+$ kubectl apply -k k8s/overlays/staging
+configmap/myapp-config-h29m57db8b created
+service/myapp created
+deployment.apps/myapp created
+
+$ kubectl apply -k k8s/overlays/prod
+configmap/myapp-config-t28bd96kb5 created
+service/myapp created
+deployment.apps/myapp created
+
+$ kubectl rollout status deployment/myapp -n dev --timeout=420s
+Waiting for deployment "myapp" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 2 of 3 updated replicas are available...
+deployment "myapp" successfully rolled out
+
+$ kubectl rollout status deployment/myapp -n staging --timeout=420s
+Waiting for deployment "myapp" rollout to finish: 2 of 3 updated replicas are available...
+deployment "myapp" successfully rolled out
+
+$ kubectl rollout status deployment/myapp -n prod --timeout=420s
+deployment "myapp" successfully rolled out
+
+# Deliverable: kubectl get all in each namespace
+
+$ kubectl get all -n dev
+NAME                      READY   STATUS    RESTARTS   AGE
+pod/myapp-b57fb64-4dp22   1/1     Running   0          7s
+pod/myapp-b57fb64-xc2dl   1/1     Running   0          7s
+pod/myapp-b57fb64-xwbsv   1/1     Running   0          7s
+
+NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.152.146   <none>        80/TCP    7s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   3/3     3            3           7s
+
+NAME                            DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-b57fb64   3         3         3       7s
+
+$ kubectl get all -n staging
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-577549489d-2k2qg   1/1     Running   0          7s
+pod/myapp-577549489d-gtpw6   1/1     Running   0          7s
+pod/myapp-577549489d-nx5nt   1/1     Running   0          7s
+
+NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.252.16   <none>        80/TCP    7s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   3/3     3            3           7s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-577549489d   3         3         3       7s
+
+$ kubectl get all -n prod
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-868cbb4c55-2nb65   1/1     Running   0          7s
+pod/myapp-868cbb4c55-blcd8   1/1     Running   0          7s
+pod/myapp-868cbb4c55-cj24q   1/1     Running   0          7s
+pod/myapp-868cbb4c55-fhbxh   1/1     Running   0          7s
+pod/myapp-868cbb4c55-qnpsk   1/1     Running   0          7s
+
+NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.166.167   <none>        80/TCP    7s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   5/5     5            5           7s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-868cbb4c55   5         5         5       7s
+
+# 4.4 Differences between environments
+
+$ kubectl get deploy -A -l app=myapp -L env
+NAMESPACE   NAME    READY   UP-TO-DATE   AVAILABLE   AGE   ENV
+dev         myapp   3/3     3            3           7s    dev
+prod        myapp   5/5     5            5           7s    prod
+staging     myapp   3/3     3            3           7s    staging
+
+$ kubectl get configmap -A -l env -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,APP_ENV:.data.APP_ENV
+NAMESPACE   NAME                      APP_ENV
+dev         myapp-config-6m894k5c89   dev
+prod        myapp-config-t28bd96kb5   prod
+staging     myapp-config-h29m57db8b   staging
+
+$ kubectl exec deploy/myapp -n dev -- wget -qO- http://127.0.0.1:3000/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"dev","apiKeyConfigured":true,"pod":"myapp-b57fb64-4dp22"}
+
+$ kubectl exec deploy/myapp -n staging -- wget -qO- http://127.0.0.1:3000/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"staging","apiKeyConfigured":true,"pod":"myapp-577549489d-2k2qg"}
+
+$ kubectl exec deploy/myapp -n prod -- wget -qO- http://127.0.0.1:3000/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"prod","apiKeyConfigured":true,"pod":"myapp-868cbb4c55-2nb65"}
