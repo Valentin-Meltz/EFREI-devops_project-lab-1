@@ -1,6 +1,6 @@
 {
   "name": "efrei-devops-project-lab-1",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Minimal Fastify API with a /health endpoint",
   "type": "module",
   "main": "src/server.js",
