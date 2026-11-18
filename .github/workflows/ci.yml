@@ -16,6 +16,18 @@ jobs:
         run: npm test
       - name: Build image
         run: docker build --build-arg GIT_SHA=${{ github.sha }} -t myapp:${{ github.sha }} .
+  validate-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # kubectl (with its bundled Kustomize) is preinstalled on ubuntu-latest
+      - name: Render overlays and check invariants
+        run: |
+          pip install PyYAML==6.0.2
+          python scripts/validate_manifests.py
   publish:
     needs: build-test
     if: github.ref == 'refs/heads/main'

@@ -1,3 +1,10 @@
 node_modules/
 npm-debug.log*
 .env
+.DS_Store
+
+# Lab 2: generated manifests (scripts/validate_manifests.py) and the raw
+# API server audit log of the local kind cluster (may hold request metadata;
+# the relevant entries are kept in evidence/07-api-audit/)
+rendered/
+evidence/audit/

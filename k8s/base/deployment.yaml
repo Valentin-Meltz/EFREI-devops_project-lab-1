@@ -4,11 +4,18 @@ metadata:
   name: myapp
   labels:
     app: myapp
+  # Release traceability (part 6.1). These values describe the baseline release
+  # v1.0.0; an overlay that deploys another release overrides them with a patch
+  # so the annotations always match the deployed image tag.
   annotations:
+    kubernetes.io/change-cause: "release v1.0.0 (ba33ff1, PR #8, run 44285404917)"
     lab.efrei.io/owner: devops-team
-    lab.efrei.io/ticket: OPS-123
-    lab.efrei.io/git-commit: "c1a13166bf8f835fb6633f0ce675db6f69cfbbce"
-    lab.efrei.io/source-repository: "Valentin-Meltz/EFREI-devops_project-lab-1"
+    lab.efrei.io/ticket: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7"
+    lab.efrei.io/source-repository: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1"
+    lab.efrei.io/release: v1.0.0
+    lab.efrei.io/git-commit: "ba33ff148f57ad68f209a683faeb358a1389c4df"
+    lab.efrei.io/pull-request: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8"
+    lab.efrei.io/pipeline-run: "https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917"
 spec:
   replicas: 3
   revisionHistoryLimit: 10
@@ -25,11 +32,16 @@ spec:
       labels:
         app: myapp
       annotations:
-        lab.efrei.io/git-commit: "c1a13166bf8f835fb6633f0ce675db6f69cfbbce"
+        lab.efrei.io/release: v1.0.0
+        lab.efrei.io/git-commit: "ba33ff148f57ad68f209a683faeb358a1389c4df"
     spec:
+      # The GHCR package is private. The pull secret is created out of band in
+      # each namespace (kubectl create secret docker-registry); only its name is here.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: myapp
-          image: ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce
+          image: ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -48,6 +60,12 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
+          # Keep serving while the pod is removed from the Service endpoints,
+          # so in-flight requests are not refused during a rolling update.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             requests:
               cpu: 100m
