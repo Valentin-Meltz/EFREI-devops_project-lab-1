@@ -1,0 +1,113 @@
+### 07 - API server audit (bonus, cluster kind-devops-audit)
+### 2026-11-18T13:55:13Z | context: kind-devops-lab
+
+# Audit flags on kube-apiserver and the audit policy in use (k8s/kind/audit-policy.yaml)
+
+$ docker exec devops-audit-control-plane grep -- '--audit' /etc/kubernetes/manifests/kube-apiserver.yaml
+    - --audit-log-maxage=7
+    - --audit-log-maxbackup=3
+    - --audit-log-maxsize=20
+    - --audit-log-path=/var/log/kubernetes/audit/audit.log
+    - --audit-policy-file=/etc/kubernetes/audit-policy.yaml
+
+$ cat k8s/kind/audit-policy.yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+        resources: ["pods", "services", "configmaps"]
+      - group: apps
+        resources: ["deployments"]
+  - level: None
+
+# Deploy the dev overlay with kubectl apply
+
+$ kubectl --context kind-devops-audit create namespace dev --dry-run=client -o yaml | kubectl --context kind-devops-audit apply -f -
+namespace/dev unchanged
+
+$ kubectl --context kind-devops-audit create secret generic myapp-secret --from-literal=API_KEY=changeme -n dev --dry-run=client -o yaml | kubectl --context kind-devops-audit apply -f -
+secret/myapp-secret created
+
+$ kubectl --context kind-devops-audit apply -k k8s/overlays/dev
+configmap/myapp-config-6m894k5c89 created
+service/myapp created
+deployment.apps/myapp created
+
+$ kubectl --context kind-devops-audit rollout status deployment/myapp -n dev --timeout=420s
+Waiting for deployment "myapp" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "myapp" rollout to finish: 2 of 3 updated replicas are available...
+deployment "myapp" successfully rolled out
+
+# Audit entries written by that kubectl apply (ResponseComplete stage, kubectl user agent)
+
+$ jq -c 'select(.stage=="ResponseComplete" and .objectRef.namespace=="dev" and (.userAgent|startswith("kubectl")) and (.verb=="create" or .verb=="patch")) | {time: .requestReceivedTimestamp, auditID, user: .user.username, verb, resource: .objectRef.resource, name: .objectRef.name, code: .responseStatus.code, userAgent}' evidence/audit/audit.log
+{"time":"2026-11-18T13:52:27.346600Z","auditID":"326ae3fc-f80b-4a21-95d3-17f9658978a8","user":"kubernetes-admin","verb":"create","resource":"configmaps","name":"myapp-config-6m894k5c89","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+{"time":"2026-11-18T13:52:27.351826Z","auditID":"8df94267-5909-43b4-839b-1fa71b5b5108","user":"kubernetes-admin","verb":"create","resource":"services","name":"myapp","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+{"time":"2026-11-18T13:52:27.360907Z","auditID":"eca9db5d-0b3b-4c04-a0c3-4caf0f66083e","user":"kubernetes-admin","verb":"create","resource":"deployments","name":"myapp","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+{"time":"2026-11-18T13:55:13.579344Z","auditID":"21b38896-213f-4977-b78f-c40191496f5d","user":"kubernetes-admin","verb":"create","resource":"configmaps","name":"myapp-config-6m894k5c89","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+{"time":"2026-11-18T13:55:13.588127Z","auditID":"4bdb1656-7bb5-457c-bbbc-d33cf591addc","user":"kubernetes-admin","verb":"create","resource":"services","name":"myapp","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+{"time":"2026-11-18T13:55:13.596993Z","auditID":"f493b987-6930-4e76-b48b-fe02105c9958","user":"kubernetes-admin","verb":"create","resource":"deployments","name":"myapp","code":201,"userAgent":"kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9"}
+
+# Full audit event for the Deployment
+
+$ jq 'select(.stage=="ResponseComplete" and .objectRef.resource=="deployments" and .objectRef.namespace=="dev" and (.userAgent|startswith("kubectl")))' evidence/audit/audit.log | jq -s 'last'
+{
+  "kind": "Event",
+  "apiVersion": "audit.k8s.io/v1",
+  "level": "Metadata",
+  "auditID": "f493b987-6930-4e76-b48b-fe02105c9958",
+  "stage": "ResponseComplete",
+  "requestURI": "/apis/apps/v1/namespaces/dev/deployments?fieldManager=kubectl-client-side-apply&fieldValidation=Strict",
+  "verb": "create",
+  "user": {
+    "username": "kubernetes-admin",
+    "groups": [
+      "kubeadm:cluster-admins",
+      "system:authenticated"
+    ],
+    "extra": {
+      "authentication.kubernetes.io/credential-id": [
+        "X509SHA256=291adebc63d4c0ff8735d61a5d8fa5f7a2d599cee9f23944830e40d302d30217"
+      ]
+    }
+  },
+  "sourceIPs": [
+    "172.25.0.1"
+  ],
+  "userAgent": "kubectl/v1.34.1 (darwin/arm64) kubernetes/93248f9",
+  "objectRef": {
+    "resource": "deployments",
+    "namespace": "dev",
+    "name": "myapp",
+    "apiGroup": "apps",
+    "apiVersion": "v1"
+  },
+  "responseStatus": {
+    "metadata": {},
+    "code": 201
+  },
+  "requestReceivedTimestamp": "2026-11-18T13:55:13.596993Z",
+  "stageTimestamp": "2026-11-18T13:55:13.599725Z",
+  "annotations": {
+    "authorization.k8s.io/decision": "allow",
+    "authorization.k8s.io/reason": "RBAC: allowed by ClusterRoleBinding \"kubeadm:cluster-admins\" of ClusterRole \"cluster-admin\" to Group \"kubeadm:cluster-admins\""
+  }
+}
+
+# What happened next, from the controllers (same log, same Deployment)
+
+$ jq -c 'select(.stage=="ResponseComplete" and .objectRef.namespace=="dev" and (.user.username|startswith("system:serviceaccount:kube-system"))) | {time: .requestReceivedTimestamp, user: .user.username, verb, resource: .objectRef.resource, name: .objectRef.name, code: .responseStatus.code}' evidence/audit/audit.log | head -n 12
+{"time":"2026-11-18T13:39:31.361099Z","user":"system:serviceaccount:kube-system:root-ca-cert-publisher","verb":"create","resource":"configmaps","name":"kube-root-ca.crt","code":201}
+{"time":"2026-11-18T13:52:27.369145Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}
+{"time":"2026-11-18T13:52:27.374220Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}
+{"time":"2026-11-18T13:52:27.374080Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}
+{"time":"2026-11-18T13:55:02.712131Z","user":"system:serviceaccount:kube-system:generic-garbage-collector","verb":"delete","resource":"pods","name":"myapp-6965555f7f-4sg26","code":200}
+{"time":"2026-11-18T13:55:02.711940Z","user":"system:serviceaccount:kube-system:generic-garbage-collector","verb":"delete","resource":"pods","name":"myapp-6965555f7f-jsdsk","code":200}
+{"time":"2026-11-18T13:55:02.711808Z","user":"system:serviceaccount:kube-system:generic-garbage-collector","verb":"delete","resource":"pods","name":"myapp-6965555f7f-xxz62","code":200}
+{"time":"2026-11-18T13:55:13.602769Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}
+{"time":"2026-11-18T13:55:13.606229Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}
+{"time":"2026-11-18T13:55:13.606344Z","user":"system:serviceaccount:kube-system:replicaset-controller","verb":"create","resource":"pods","name":null,"code":201}

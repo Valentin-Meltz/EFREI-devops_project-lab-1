@@ -1,150 +1,113 @@
 # EFREI DevOps — Lab 2
 
-**Session 2: Kubernetes, Multi-environment Deployment and Audit**  
-Continuation of [Lab 1](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1), a Fastify API exposing `GET /health` on port 3000.
+**Session 2: Kubernetes, Multi-environment Deployment and Audit**
+Continuation of Lab 1: a Fastify API on port 3000 exposing `GET /health` (probes) and `GET /` (release information: version, commit, environment, pod).
+
+- Answers to questions 1–8: [ANSWERS.md](ANSWERS.md)
+- Captured outputs for every part: [evidence/README.md](evidence/README.md)
 
 ## Architecture
 
-`Git commit → GitHub Actions → GHCR image → Kustomize overlays → Kubernetes Deployment → Service → Pods`
+`Pull Request (reviewed) → GitHub Actions → multi-arch GHCR image tagged with the commit SHA → Kustomize overlay → Deployment → Service → Pods`
 
-| Environment | Namespace | Replicas | APP_ENV |
-| --- | --- | ---: | --- |
-| Development | `dev` | 3 | `dev` |
-| Staging | `staging` | 3 | `staging` |
-| Production | `prod` | 5 | `prod` |
+| Environment | Namespace | Replicas | APP_ENV | Release |
+| --- | --- | ---: | --- | --- |
+| Development | `dev` | 3 | `dev` | v1.1.0 (`982483e`, PR #9) |
+| Staging | `staging` | 3 | `staging` | v1.0.0 (`ba33ff1`, PR #8) |
+| Production | `prod` | 5 | `prod` | v1.0.0 (`ba33ff1`, PR #8) |
 
-All three environments share the same base Deployment and Service. `myapp` exposes port 80 and forwards traffic to the application's port 3000. Readiness and liveness probes check `/health`. CPU/memory requests and limits are configured. Rolling updates use `maxSurge: 1`, `maxUnavailable: 0`.
+```text
+k8s/
+  base/                 Deployment (probes, resources, ConfigMap/Secret env, release annotations) + Service
+  overlays/{dev,staging,prod}/   namespace, env label, replicas, APP_ENV, pinned image tag
+  rbac/                 viewer ServiceAccount, read-only pod-reader Role, RoleBinding (dev)
+  experiments/          disposable drills: broken probes, in-cluster traffic generator
+  kind/                 audit policy and kind config for the API server audit bonus
+scripts/
+  create_pull_secret.sh       ghcr-pull imagePullSecret from a token file (never printed)
+  evidence/0N-*.sh            one script per lab part, writes evidence/0N-*/
+  validate_manifests.py       renders the overlays and checks invariants (also run in CI)
+  create_audit_cluster.sh     kind cluster with API server auditing (bonus)
+```
+
+The Service listens on port 80 and targets the container port 3000. Rolling updates use `maxSurge: 1` and `maxUnavailable: 0`; a 5 s `preStop` sleep lets a terminating pod finish serving while it leaves the Service endpoints.
+
+## Images and traceability
+
+Images are built and pushed by the `publish` job of `.github/workflows/ci.yml` on every merge to `main`, for `linux/amd64` and `linux/arm64` (the kind node of this lab is arm64), tagged with the full commit SHA:
+
+| Release | Commit (= image tag) | Pull request | CI run |
+| --- | --- | --- | --- |
+| v1.0.0 | `ba33ff148f57ad68f209a683faeb358a1389c4df` | [#8](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/8) | [44285404917](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44285404917) |
+| v1.1.0 | `982483e48711ca36531464c164ad73718640ee22` | [#9](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/pull/9) | [44314886057](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/44314886057) |
+
+The Deployment carries the release annotations declaratively (`k8s/base/deployment.yaml`, overridden by the dev overlay for v1.1.0): `kubernetes.io/change-cause`, `lab.efrei.io/release`, `git-commit`, `pull-request`, `pipeline-run`, `owner` and `ticket` (change ticket: [issue #7](https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/issues/7)). `scripts/validate_manifests.py` fails if the `git-commit` annotation does not match the image tag. They are not added with `kubectl annotate`, which would create drift (see Q8).
 
 ## Prerequisites
 
-Docker, `kind`, `kubectl` with integrated Kustomize, access to the published Lab 1 GHCR image. If GHCR is private, configure `imagePullSecrets` separately and do not commit credentials.
+Docker, `kind`, `kubectl` (with its bundled Kustomize), `jq`, `gh` (for part 6) and Python 3 with PyYAML (for the validator and the audit cluster helper).
 
-**Image reference:** `ghcr.io/valentin-meltz/efrei-devops_project-lab-1:c1a13166bf8f835fb6633f0ce675db6f69cfbbce` (Lab 1 `main`, merge PR #5). The commit SHA is confirmed from Git history; **publication and pull access on GHCR have not been verified**. Confirm the package version and access before deploying. All three overlays pin this same tag; the Deployment and Pod template annotate the same source commit. The pipeline run URL and reviewer must be obtained from the actual Lab 1 GitHub Actions run / pull request, not inferred.
+The GHCR package is **private**. Create a classic GitHub token with only the `read:packages` scope (GHCR does not accept fine-grained tokens), save it outside the repository, then create the pull secret in each namespace:
 
-## 1. Cluster and namespaces
+```bash
+# copy the token to the clipboard first; it is never displayed
+mkdir -p ~/.config && pbpaste > ~/.config/ghcr-pull-token && chmod 600 ~/.config/ghcr-pull-token
+scripts/create_pull_secret.sh            # creates/updates ghcr-pull in dev, staging and prod
+```
+
+The Deployment only references the secret by name (`imagePullSecrets: ghcr-pull`); no credential is ever written in a manifest.
+
+## Running the lab
+
+Each part has a script that runs the real commands, prints them with their output and saves the same output under `evidence/`. They refuse to run if the current context is not `kind-devops-lab`.
+
+### 1. Cluster and namespaces
 
 ```bash
 kind create cluster --name devops-lab
-kubectl cluster-info
-kubectl get nodes
-for ns in dev staging prod; do kubectl create namespace "$ns"; done
+kubectl create namespace dev && kubectl create namespace staging && kubectl create namespace prod
+scripts/create_pull_secret.sh
+scripts/evidence/01-cluster.sh
 ```
 
-## 2. First deployment (base)
+### 2. First deployment — `scripts/evidence/02-first-deployment.sh`
 
-The base Deployment requires `myapp-config` and `myapp-secret` in the target namespace. Create them first (the key is deliberately fake):
+Creates `myapp-config` and the fake `myapp-secret` in `dev`, applies the base (`kubectl apply -f k8s/base/deployment.yaml -f k8s/base/service.yaml -n dev`; `kustomization.yaml` is not a cluster object), reaches the app with `kubectl port-forward svc/myapp 8080:80`, deletes a pod and watches the ReplicaSet replace it, scales to 5 then back to 3.
 
-```bash
-kubectl create configmap myapp-config --from-literal=APP_ENV=dev -n dev
-kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n dev
-kubectl apply -f k8s/base/ -n dev
-kubectl rollout status deployment/myapp -n dev --timeout=180s
-kubectl get all -n dev
-kubectl port-forward svc/myapp 8080:80 -n dev
-# In another terminal: curl -i http://localhost:8080/health
-```
+### 3. Probes, resources and configuration — `scripts/evidence/03-probes-config.sh`
 
-Observe self-healing and scaling:
+Shows the probes, requests/limits and environment injection, proves the Secret is only base64-encoded, then deploys `k8s/experiments/broken-probe` (a one-replica copy of the app whose probes call `/broken`) next to the real app, observes it with `kubectl describe`, and deletes it. The real `myapp` is never modified.
+
+### 4. Multi-environment with Kustomize — `scripts/evidence/04-kustomize.sh`
+
+Removes the part 2 objects from `dev`, creates the fake Secret in `staging`/`prod`, previews and diffs the rendered overlays, applies the three overlays and records `kubectl get all` in each namespace.
 
 ```bash
-kubectl get pods -n dev
-kubectl delete pod <POD_NAME> -n dev
-kubectl get pods -n dev -w
-kubectl scale deployment/myapp --replicas=5 -n dev
-kubectl get deployment myapp -n dev
-kubectl scale deployment/myapp --replicas=3 -n dev
-```
-
-## 3. Probes, resources and configuration
-
-The base manifest includes readiness/liveness probes, CPU/memory resources, `APP_ENV` from a ConfigMap and `API_KEY` from a Secret. To observe a failed probe, temporarily change `/health` to `/broken` in a disposable deployment, apply it, then inspect `kubectl describe pod ... -n dev` and restore `/health`. Never leave the broken probe committed.
-
-## 4. Kustomize environments
-
-**Important:** do not mix the initial `kubectl apply -f k8s/base/` workflow with overlays without cleaning up: Kustomize-generated ConfigMap names have hashes and should be managed consistently. For the final environment deployment, remove the initial `dev` Deployment and Service first (do not delete the namespace), then deploy overlays.
-
-```bash
-kubectl delete -f k8s/base/ -n dev --ignore-not-found
 kubectl kustomize k8s/overlays/prod
+kubectl apply -k k8s/overlays/dev && kubectl apply -k k8s/overlays/staging && kubectl apply -k k8s/overlays/prod
+kubectl get deploy -A -l app=myapp -L env
 ```
 
-Create the fake Secret in each namespace **before applying the overlays** (the ConfigMaps are generated automatically):
+### 5. Rolling update and rollback — `scripts/evidence/05-rollout.sh`
 
-```bash
-for ns in dev staging prod; do
-  kubectl create secret generic myapp-secret --from-literal=API_KEY=changeme -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
-done
-kubectl apply -k k8s/overlays/dev
-kubectl apply -k k8s/overlays/staging
-kubectl apply -k k8s/overlays/prod
-for ns in dev staging prod; do
-  kubectl rollout status deployment/myapp -n "$ns" --timeout=180s
-  kubectl get all -n "$ns"
-done
-kubectl get deploy -A -l app=myapp
-```
+Requires dev on v1.0.0 (end of part 4) and the dev overlay pinned to v1.1.0. Starts `k8s/experiments/traffic-generator.yaml` (a pod calling `http://myapp/` every 0.2 s), shows `kubectl diff -k`, applies the overlay and waits for the old pods to be gone. Then it deploys a non-existent tag with `kubectl set image`, shows the stalled rollout, runs `kubectl rollout undo`, prints the revision history, checks that `kubectl diff -k` is empty again, and counts the HTTP results of the whole run.
 
-The generated ConfigMaps are environment-specific. The demo Secret is created outside Git, avoiding real credentials in manifests. In a real environment, use a secret manager.
+### 6. Audit and traceability — `scripts/evidence/06-traceability.sh`
 
-## 5. Rolling update and rollback
+Run it right after part 5 (events expire after one hour). Prints the prod release annotations, walks from a prod pod back to its image digest, commit, PR, reviewer and CI run, reconstructs the dev history from events, `describe` and ReplicaSets, applies `k8s/rbac` and tests the viewer account with `kubectl auth can-i` and real requests.
 
-For a genuine successful rolling update, first publish a **new working Lab 1 image** with a changed application response and tests. Record the original SHA and the new SHA. Update `newTag` in `k8s/overlays/dev/kustomization.yaml` to the new SHA and apply:
+### 6.4 Bonus: API server audit — `scripts/evidence/07-api-audit.sh`
 
-```bash
-kubectl apply -k k8s/overlays/dev
-kubectl rollout status deployment/myapp -n dev --timeout=180s
-kubectl rollout history deployment/myapp -n dev
-```
-
-To demonstrate a failed image pull, set the dev overlay's `newTag` to `intentionally-missing-image-tag`, apply it and inspect the rollout. The rollout should stall; do not assume `kubectl rollout status` will finish successfully:
-
-```bash
-kubectl apply -k k8s/overlays/dev
-kubectl get pods -n dev
-kubectl describe deployment/myapp -n dev
-kubectl rollout status deployment/myapp -n dev --timeout=60s
-kubectl rollout undo deployment/myapp -n dev
-kubectl rollout status deployment/myapp -n dev --timeout=180s
-kubectl rollout history deployment/myapp -n dev
-```
-
-**After the demo**, restore the valid `newTag` in Git and re-apply the overlay so the declarative state matches the cluster. Record the output and images used for the evidence.
-
-## 6. RBAC and audit traceability
-
-```bash
-kubectl apply -k k8s/rbac
-kubectl auth can-i list pods -n dev --as=system:serviceaccount:dev:viewer
-kubectl auth can-i delete pods -n dev --as=system:serviceaccount:dev:viewer
-kubectl annotate deployment myapp -n prod \
-  git-commit="c1a13166bf8f835fb6633f0ce675db6f69cfbbce" \
-  pipeline-run="<REAL_GITHUB_ACTIONS_RUN_URL>" \
-  owner="devops-team" ticket="OPS-123" --overwrite
-kubectl get events -n prod --sort-by=.metadata.creationTimestamp
-kubectl describe deployment myapp -n prod
-```
-
-Expected RBAC decisions for the viewer account are `yes` for listing pods and `no` for deleting pods, subject to the cluster's actual authorization policy. The audit annotations are examples and **must** be replaced with real references before claiming traceability.
-
-### Optional API server audit bonus
-
-See [docs/audit-guide.md](docs/audit-guide.md) for a dedicated kind cluster configuration and an audit-log inspection procedure.
-
-## Answers and evidence
-
-- [ANSWERS.md](ANSWERS.md): all eight theory answers.
-- [docs/deployment-guide.md](docs/deployment-guide.md): evidence collection checklist.
-- [evidence/README.md](evidence/README.md): evidence inventory (populate after execution).
-
-No execution results are claimed by this repository unless captured in `evidence/`.
+See [docs/audit-guide.md](docs/audit-guide.md).
 
 ## Automated checks
 
-The `Validate Kubernetes manifests` workflow renders all three overlays and RBAC, checks expected namespaces, replicas, selectors, ports, probes, resource policies and configuration references, then checks Kubernetes resource schemas with kubeconform. Rendered manifests are uploaded as a CI artifact. This is static validation; it does **not** prove image availability or successful deployment.
+The `validate-manifests` CI job (and `python3 scripts/validate_manifests.py` locally) renders the three overlays and RBAC and checks namespaces, replicas, selectors, ports, probes, resources, ConfigMap/Secret/pull secret references, and that each overlay's release annotations match its image tag. Static validation only: it does not prove that the image exists or that the deployment works; the scripts above do.
+
+## Cleanup
 
 ```bash
-python3 -m pip install PyYAML==6.0.2
-python3 scripts/validate_manifests.py  # requires kubectl
+kind delete cluster --name devops-audit     # bonus cluster
+kind delete cluster --name devops-lab
+rm ~/.config/ghcr-pull-token                # then revoke the token on github.com/settings/tokens
 ```
-
-The real image reference must be confirmed from the Lab 1 GHCR package before runtime deployment. The placeholder is deliberately not presented as a working image.

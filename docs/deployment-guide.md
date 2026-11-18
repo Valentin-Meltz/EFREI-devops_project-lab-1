@@ -1,18 +1,20 @@
-# Verification and evidence checklist
+# Evidence run order
 
-Run the following against the cluster after configuring a real published image tag.
+The scripts in `scripts/evidence/` reproduce the lab end to end. They run against the `kind-devops-lab` context only and overwrite their own file in `evidence/`.
 
-1. `kubectl get nodes -o wide` and `kubectl get namespaces` — cluster and namespace context.
-2. `kubectl get all -n dev`, `kubectl get all -n staging`, `kubectl get all -n prod` — required environment outputs.
-3. `kubectl get deploy -A -l app=myapp` — replica comparison.
-4. `kubectl port-forward svc/myapp 8080:80 -n dev` and `curl -i http://localhost:8080/health` — HTTP response.
-5. Delete one pod; record replacement pod appearing and eventual Ready status.
-6. Scale to 5 and back to 3; record desired/ready counts.
-7. Break the probe path; record `kubectl describe pod` events, then restore it.
-8. Perform a successful update with a real second image and record `kubectl rollout status` and response change.
-9. Apply an invalid image tag; record `ImagePullBackOff`/failed rollout; undo and record successful recovery plus history.
-10. Apply `k8s/rbac`; capture both `kubectl auth can-i` results.
-11. Record production Deployment annotations, pod image reference, relevant events and corresponding GitHub PR and Actions URL.
-12. Optional: collect API server audit event from the configured kind audit cluster.
+| Order | Command | State before | State after |
+| --- | --- | --- | --- |
+| 0 | `kind create cluster --name devops-lab`, create the three namespaces, `scripts/create_pull_secret.sh` | — | empty namespaces with `ghcr-pull` |
+| 1 | `scripts/evidence/01-cluster.sh` | | |
+| 2 | `scripts/evidence/02-first-deployment.sh` | no `myapp` objects in `dev` | base Deployment/Service + hand-made ConfigMap and Secret in `dev` |
+| 3 | `scripts/evidence/03-probes-config.sh` | part 2 | unchanged (the broken-probe drill is deleted at the end) |
+| 4 | `scripts/evidence/04-kustomize.sh` | part 2 | the three overlays deployed, all on v1.0.0 |
+| 5 | point `k8s/overlays/dev` to v1.1.0, then `scripts/evidence/05-rollout.sh` | dev on v1.0.0 | dev on v1.1.0, revisions 1, 3 (drill), 4 |
+| 6 | `scripts/evidence/06-traceability.sh` (within the hour, for events) | part 5 | + `viewer` ServiceAccount, Role and RoleBinding |
+| 7 | `scripts/evidence/07-api-audit.sh` | audit cluster from `scripts/create_audit_cluster.sh` with `ghcr-pull` in `dev` | dev overlay deployed on `devops-audit` |
 
-Store screenshots or terminal output in `evidence/` with meaningful filenames. Do not submit example output as measured output.
+## Re-running a part
+
+- **Part 2**: `kubectl delete -f k8s/base/deployment.yaml -f k8s/base/service.yaml -n dev`, then delete `configmap/myapp-config` and `secret/myapp-secret` in `dev`.
+- **Part 5**: dev must be back at the end state of part 4. Delete `deployment/myapp` in `dev` and apply the dev overlay with the v1.0.0 tag and without the release patch (identical to the staging overlay with `dev` values), then run the script with the overlay pointing to v1.1.0 again.
+- **Part 7**: delete `deployment/myapp`, `service/myapp`, the `env=dev` ConfigMap and `secret/myapp-secret` in `dev` on `devops-audit`, so `kubectl apply` creates them again.
