@@ -7,9 +7,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# Scripts that only use Docker (no Kubernetes) set NO_KUBE=1 before sourcing.
+NO_KUBE="${NO_KUBE:-}"
+
 # Refuse to run against another cluster (kind create cluster switches the context).
 EXPECTED_CONTEXT="${EXPECTED_CONTEXT:-kind-devops-lab}"
-if [ "$(kubectl config current-context 2>/dev/null)" != "$EXPECTED_CONTEXT" ]; then
+if [ -z "$NO_KUBE" ] && [ "$(kubectl config current-context 2>/dev/null)" != "$EXPECTED_CONTEXT" ]; then
   echo "Current kubectl context is not $EXPECTED_CONTEXT; run: kubectl config use-context $EXPECTED_CONTEXT" >&2
   exit 1
 fi
@@ -18,9 +21,14 @@ fi
 start_log() {
   LOG="$ROOT/$1"
   mkdir -p "$(dirname "$LOG")"
+  if [ -n "$NO_KUBE" ]; then
+    where="$(terraform version | head -n 1), docker $(docker version --format '{{.Server.Version}}')"
+  else
+    where="context: $(kubectl config current-context 2>/dev/null)"
+  fi
   {
     echo "### $2"
-    echo "### $(date -u '+%Y-%m-%dT%H:%M:%SZ') | context: $(kubectl config current-context 2>/dev/null)"
+    echo "### $(date -u '+%Y-%m-%dT%H:%M:%SZ') | $where"
   } | tee "$LOG"
 }
 
