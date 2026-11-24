@@ -1,0 +1,24 @@
+# Checkov policy for the Terraform code (Lab 3, part 5.3). Used by the
+# terraform workflow and picked up automatically by a local run from the
+# repository root:  checkov  (or: checkov --config-file .checkov.yaml)
+#
+# Open-source Checkov reports no severity (severities come from the Prisma
+# Cloud platform), so "--hard-fail-on HIGH" would never fail. The high-severity
+# checks are listed explicitly instead: everything that lets a container reach
+# or escape to its host. Any other failed check is reported but does not fail.
+directory:
+  - infra
+framework:
+  - terraform
+compact: true
+quiet: true
+skip-download: true
+hard-fail-on:
+  - CKV_K8S_16  # privileged container
+  - CKV_K8S_159 # privileged container
+  - CKV_K8S_17  # host PID namespace
+  - CKV_K8S_18  # host IPC namespace
+  - CKV_K8S_19  # host network namespace
+  - CKV_K8S_20  # allowPrivilegeEscalation
+  - CKV_K8S_27  # Docker daemon socket mounted in a container
+  - CKV_K8S_39  # CAP_SYS_ADMIN capability

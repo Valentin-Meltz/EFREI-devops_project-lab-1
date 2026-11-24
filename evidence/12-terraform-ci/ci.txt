@@ -1,0 +1,405 @@
+### 12 - Terraform CI: validate, plan, security scan
+### 2026-11-24T10:39:41Z | Terraform v1.17.2, docker 28.4.0
+
+# The workflow: Pull Requests touching infra/** only, read-only token, actions pinned to commit SHAs
+
+$ cat .github/workflows/terraform.yml
+name: terraform
+
+# Lab 3, part 5: checks every Pull Request that changes the Terraform code.
+# It never runs apply (5.4): changes are applied only after merge, from the
+# reviewed main branch.
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".checkov.yaml"
+      - ".github/workflows/terraform.yml"
+
+# Read-only token: this workflow needs no write access and no cloud credentials.
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TERRAFORM_VERSION: "1.17.2"
+
+# Actions are pinned to full commit SHAs: a tag can be moved to malicious code
+# (as happened to 76 tags of aquasecurity/trivy-action in March 2026).
+jobs:
+  validate:
+    name: fmt + validate (${{ matrix.root }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        root:
+          - infra/quickstart
+          - infra/modules/webapp
+          - infra/envs/dev
+          - infra/envs/staging
+          - infra/preview
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      # 5.1
+      - name: terraform fmt -check
+        run: terraform -chdir=${{ matrix.root }} fmt -check -diff
+      # No backend: validation needs neither a state nor credentials. The
+      # committed lock file must already cover the runner (-lockfile=readonly).
+      - name: terraform init
+        run: terraform -chdir=${{ matrix.root }} init -backend=false -lockfile=readonly
+      - name: terraform validate
+        run: terraform -chdir=${{ matrix.root }} validate
+
+  plan:
+    name: plan (${{ matrix.env }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, staging]
+    env:
+      ROOT: infra/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      # The real dev state lives in a shared folder on the lab machine, which a
+      # GitHub runner cannot reach, so CI plans against an empty state: the plan
+      # shows everything the configuration declares. With a real remote backend,
+      # the runner would read the state with short-lived OIDC credentials.
+      - name: terraform init
+        run: terraform -chdir="$ROOT" init -lockfile=readonly
+      # 5.2: the plan is saved, rendered as text and uploaded. The binary plan
+      # file is not uploaded: like the state, it can hold sensitive values.
+      - name: terraform plan
+        run: |
+          terraform -chdir="$ROOT" plan -var-file=${{ matrix.env }}.tfvars -lock-timeout=60s -no-color -out=tfplan
+          terraform -chdir="$ROOT" show -no-color tfplan > "plan-${{ matrix.env }}.txt"
+      - name: Plan summary
+        run: |
+          {
+            echo "### terraform plan (${{ matrix.env }})"
+            echo '```'
+            grep -E '^(Plan:|No changes)' "plan-${{ matrix.env }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-${{ matrix.env }}
+          path: plan-${{ matrix.env }}.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  # 5.3: static security scan. The policy (which checks fail the build) is in
+  # .checkov.yaml at the repository root.
+  security:
+    name: checkov (fails on high severity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: bridgecrewio/checkov-action@8e8cda997b70e26df83e7a0564476f89eb9ed757 # v12.3144.0 (checkov 3.4.8)
+        with:
+          config_file: .checkov.yaml
+          directory: infra
+
+# 5.4 Every terraform command the workflow runs: fmt, init, validate, plan, show; never apply
+
+$ grep -nE 'run: .*terraform|^ +terraform ' .github/workflows/terraform.yml
+52:        run: terraform -chdir=${{ matrix.root }} fmt -check -diff
+56:        run: terraform -chdir=${{ matrix.root }} init -backend=false -lockfile=readonly
+58:        run: terraform -chdir=${{ matrix.root }} validate
+84:        run: terraform -chdir="$ROOT" init -lockfile=readonly
+89:          terraform -chdir="$ROOT" plan -var-file=${{ matrix.env }}.tfvars -lock-timeout=60s -no-color -out=tfplan
+90:          terraform -chdir="$ROOT" show -no-color tfplan > "plan-${{ matrix.env }}.txt"
+
+$ grep -nE 'terraform .*apply' .github/workflows/terraform.yml || echo 'no terraform apply in the workflow'
+no terraform apply in the workflow
+
+# 5.3 Security policy used by the workflow (and by a local checkov run)
+
+$ cat .checkov.yaml
+# Checkov policy for the Terraform code (Lab 3, part 5.3). Used by the
+# terraform workflow and picked up automatically by a local run from the
+# repository root:  checkov  (or: checkov --config-file .checkov.yaml)
+#
+# Open-source Checkov reports no severity (severities come from the Prisma
+# Cloud platform), so "--hard-fail-on HIGH" would never fail. The high-severity
+# checks are listed explicitly instead: everything that lets a container reach
+# or escape to its host. Any other failed check is reported but does not fail.
+directory:
+  - infra
+framework:
+  - terraform
+compact: true
+quiet: true
+skip-download: true
+hard-fail-on:
+  - CKV_K8S_16  # privileged container
+  - CKV_K8S_159 # privileged container
+  - CKV_K8S_17  # host PID namespace
+  - CKV_K8S_18  # host IPC namespace
+  - CKV_K8S_19  # host network namespace
+  - CKV_K8S_20  # allowPrivilegeEscalation
+  - CKV_K8S_27  # Docker daemon socket mounted in a container
+  - CKV_K8S_39  # CAP_SYS_ADMIN capability
+
+# Runs of the terraform workflow on PR #12, oldest last
+
+$ gh run list --repo Valentin-Meltz/EFREI-devops_project-lab-1 --workflow terraform.yml --branch feature/lab3-terraform --limit 10
+completed	success	Lab 3: Terraform, environments and ephemeral previews	terraform	feature/lab3-terraform	pull_request	45376602767	28s	2026-11-24T10:37:50Z
+completed	failure	Lab 3: Terraform, environments and ephemeral previews	terraform	feature/lab3-terraform	pull_request	45376412695	27s	2026-11-24T10:36:38Z
+completed	success	Lab 3: Terraform, environments and ephemeral previews	terraform	feature/lab3-terraform	pull_request	45376225146	29s	2026-11-24T10:35:27Z
+
+# Run 1, workflow added (5f88cc5): passes
+
+$ gh run view --repo Valentin-Meltz/EFREI-devops_project-lab-1 45376225146
+
+✓ feature/lab3-terraform terraform Valentin-Meltz/EFREI-devops_project-lab-1#12 · 45376225146
+Triggered via pull_request about 4 minutes ago
+
+JOBS
+✓ fmt + validate (infra/quickstart) in 9s (ID 138383124413)
+✓ fmt + validate (infra/modules/webapp) in 9s (ID 138383124623)
+✓ fmt + validate (infra/envs/staging) in 9s (ID 138383124717)
+✓ checkov (fails on high severity) in 18s (ID 138383124762)
+✓ fmt + validate (infra/envs/dev) in 14s (ID 138383124887)
+✓ fmt + validate (infra/preview) in 7s (ID 138383124987)
+✓ plan (staging) in 9s (ID 138383280070)
+✓ plan (dev) in 9s (ID 138383280121)
+
+ARTIFACTS
+plan-dev
+plan-staging
+
+For more information about a job, try: gh run view --job=<job-id>
+View this run on GitHub: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376225146
+
+# Run 2, 5.5 deliberate misconfiguration (d1f5323): a privileged container allowed to escalate privileges
+
+$ git show --format='%h %s' d1f5323 -- infra/preview/main.tf
+d1f5323 test(ci): deliberate misconfiguration for lab 3 part 5.5
+
+diff --git a/infra/preview/main.tf b/infra/preview/main.tf
+index 337841f..68096c3 100644
+--- a/infra/preview/main.tf
++++ b/infra/preview/main.tf
+@@ -154,7 +154,10 @@ resource "kubernetes_deployment" "app" {
+           }
+ 
+           security_context {
+-            allow_privilege_escalation = false
++            # DELIBERATE MISCONFIGURATION (Lab 3, part 5.5), reverted next:
++            # a privileged container that may escalate privileges.
++            privileged                 = true
++            allow_privilege_escalation = true
+             read_only_root_filesystem  = true
+             capabilities {
+               drop = ["ALL"]
+
+$ gh run view --repo Valentin-Meltz/EFREI-devops_project-lab-1 45376412695
+
+X feature/lab3-terraform terraform Valentin-Meltz/EFREI-devops_project-lab-1#12 · 45376412695
+Triggered via pull_request about 3 minutes ago
+
+JOBS
+X checkov (fails on high severity) in 18s (ID 138383775231)
+  ✓ Set up job
+  ✓ Pull ghcr.io/bridgecrewio/checkov:3.4.8
+  ✓ Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+  X Run bridgecrewio/checkov-action@8e8cda997b70e26df83e7a0564476f89eb9ed757
+  ✓ Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+  ✓ Complete job
+✓ fmt + validate (infra/modules/webapp) in 8s (ID 138383775540)
+✓ fmt + validate (infra/quickstart) in 10s (ID 138383775683)
+✓ fmt + validate (infra/preview) in 7s (ID 138383775748)
+✓ fmt + validate (infra/envs/dev) in 11s (ID 138383775749)
+✓ fmt + validate (infra/envs/staging) in 10s (ID 138383775812)
+✓ plan (dev) in 11s (ID 138383888923)
+✓ plan (staging) in 11s (ID 138383888950)
+
+ANNOTATIONS
+X CKV_K8S_16: "Do not admit privileged containers"
+checkov (fails on high severity): .github#73
+
+X CKV_K8S_20: "Containers should not run with allowPrivilegeEscalation"
+checkov (fails on high severity): .github#73
+
+
+ARTIFACTS
+plan-dev
+plan-staging
+
+To see what failed, try: gh run view 45376412695 --log-failed
+View this run on GitHub: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376412695
+
+# Checkov output of the failed job: the two high-severity checks fail the build
+
+$ gh run view --repo Valentin-Meltz/EFREI-devops_project-lab-1 45376412695 --log-failed | cut -f3- | sed -E 's/^\xEF\xBB\xBF//; s/^[0-9TZ:.-]+ //' | sed -n '/running checkov on directory/,$p' | grep -vE '^BC_'
+running checkov on directory: infra
+checkov -d infra --config-file .checkov.yaml --output sarif
+
+       _               _
+   ___| |__   ___  ___| | _______   __
+  / __| '_ \ / _ \/ __| |/ / _ \ \ / /
+ | (__| | | |  __/ (__|   < (_) \ V /
+  \___|_| |_|\___|\___|_|\_\___/ \_/
+
+By Prisma Cloud | version: 3.4.8 
+terraform scan results:
+
+Passed checks: 26, Failed checks: 2, Skipped checks: 2
+
+Check: CKV_K8S_20: "Containers should not run with allowPrivilegeEscalation"
+	FAILED for resource: kubernetes_deployment.app
+##[error]	File: /preview/main.tf:73-176
+Check: CKV_K8S_16: "Do not admit privileged containers"
+	FAILED for resource: kubernetes_deployment.app
+##[error]	File: /preview/main.tf:73-176
+
+
+Wrote output in SARIF format to the file 'results.sarif'
+
+# Run 3, 5.6 revert (cab99bd): passes again
+
+$ git show --stat --format='%h %s' cab99bd
+cab99bd Revert "test(ci): deliberate misconfiguration for lab 3 part 5.5"
+
+ infra/preview/main.tf | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+$ gh run view --repo Valentin-Meltz/EFREI-devops_project-lab-1 45376602767
+
+✓ feature/lab3-terraform terraform Valentin-Meltz/EFREI-devops_project-lab-1#12 · 45376602767
+Triggered via pull_request about 2 minutes ago
+
+JOBS
+✓ checkov (fails on high severity) in 19s (ID 138384438650)
+✓ fmt + validate (infra/envs/staging) in 9s (ID 138384438996)
+✓ fmt + validate (infra/modules/webapp) in 12s (ID 138384439131)
+✓ fmt + validate (infra/preview) in 11s (ID 138384439194)
+✓ fmt + validate (infra/quickstart) in 9s (ID 138384439214)
+✓ fmt + validate (infra/envs/dev) in 7s (ID 138384439217)
+✓ plan (dev) in 8s (ID 138384573094)
+✓ plan (staging) in 10s (ID 138384573156)
+
+ARTIFACTS
+plan-staging
+plan-dev
+
+For more information about a job, try: gh run view --job=<job-id>
+View this run on GitHub: https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767
+
+# 5.2 The plan of each environment is uploaded as an artifact (text only, kept 7 days)
+
+$ gh api repos/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/artifacts --jq '.artifacts[] | "\(.name)  \(.size_in_bytes) bytes  expires \(.expires_at)"'
+plan-staging  877 bytes  expires 2026-12-01T10:38:13Z
+plan-dev  864 bytes  expires 2026-12-01T10:38:13Z
+
+$ gh run download --repo Valentin-Meltz/EFREI-devops_project-lab-1 45376602767 -n plan-dev -D /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/tmp.AC5w5BsSg5 && cat /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/tmp.AC5w5BsSg5/plan-dev.txt
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # module.webapp.docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = (known after apply)
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "webapp-dev"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8083
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+  # module.webapp.docker_image.app will be created
+  + resource "docker_image" "app" {
+      + id           = (known after apply)
+      + image_id     = (known after apply)
+      + keep_locally = true
+      + name         = "nginx:1.27"
+      + repo_digest  = (known after apply)
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + app_url        = "http://localhost:8083"
+  + container_name = "webapp-dev"
+
+# Checks on the head of PR #12
+
+$ gh pr checks 12 --repo Valentin-Meltz/EFREI-devops_project-lab-1
+publish	skipping	0	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602624/job/138384720828	
+build-test	pass	28s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602624/job/138384438395	
+checkov (fails on high severity)	pass	19s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384438650	
+fmt + validate (infra/envs/dev)	pass	7s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384439217	
+fmt + validate (infra/envs/staging)	pass	9s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384438996	
+fmt + validate (infra/modules/webapp)	pass	12s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384439131	
+fmt + validate (infra/preview)	pass	11s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384439194	
+fmt + validate (infra/quickstart)	pass	9s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384439214	
+plan (dev)	pass	8s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384573094	
+plan (staging)	pass	10s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602767/job/138384573156	
+validate-manifests	pass	9s	https://github.com/Valentin-Meltz/EFREI-devops_project-lab-1/actions/runs/45376602624/job/138384438027	

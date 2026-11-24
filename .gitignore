@@ -9,7 +9,23 @@ npm-debug.log*
 rendered/
 evidence/audit/
 
-# Lab 3: Terraform local state and provider cache (never commit state)
-*.tfstate
-*.tfstate.*
+# Lab 3: Terraform
+# State (and its backup and lock files), saved plans and the provider cache are
+# never committed: state and plans hold every attribute in clear text.
+# .terraform.lock.hcl is committed on purpose (provider versions and checksums).
+*.tfstate*
+*.tfplan
+tfplan
 .terraform/
+crash.log
+crash.*.log
+# Variable files holding secrets are named *.secret.tfvars, and the files
+# Terraform loads automatically (terraform.tfvars, *.auto.tfvars) are local
+# overrides: none of them is committed. Plain per-environment files such as
+# dev.tfvars and staging.tfvars hold no secret and are committed.
+*.secret.tfvars
+*.secret.tfvars.json
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json

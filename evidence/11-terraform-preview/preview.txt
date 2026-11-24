@@ -1,0 +1,1370 @@
+### 11 - Ephemeral preview environments per Pull Request
+### 2026-11-24T10:33:52Z | context: kind-devops-lab
+
+# Reset before this run: previews pr-42 and pr-43 of a previous run destroyed
+
+# Code (4.1: Service added; 4.5: owner and expires labels)
+
+$ tail -n +1 infra/preview/main.tf infra/preview/variables.tf infra/preview/outputs.tf
+==> infra/preview/main.tf <==
+# Ephemeral preview environment: one namespace pr-<number> per Pull Request,
+# running the Session 2 application. Each PR has its own state file:
+#   terraform init -reconfigure -backend-config="path=state/pr-<number>.tfstate"
+# (-reconfigure: switching PRs must never migrate one PR's state into another's).
+terraform {
+  backend "local" {}
+
+  required_providers {
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.30"
+    }
+  }
+}
+
+provider "kubernetes" {
+  config_path = "~/.kube/config"
+  # Pinned, so a preview can never land on whatever context is current.
+  config_context = var.kube_context
+}
+
+locals {
+  namespace = "pr-${var.pr_number}"
+  app       = { app = "myapp" }
+  # Stamped when the namespace is created (see ignore_changes below).
+  expires = formatdate("YYYY-MM-DD", timeadd(plantimestamp(), "${var.ttl_days * 24}h"))
+}
+
+resource "kubernetes_namespace" "preview" {
+  metadata {
+    name = local.namespace
+    labels = {
+      purpose = "preview"
+      pr      = var.pr_number
+      # Cost control (4.5): who to ask, and when it may be deleted.
+      owner   = var.owner
+      expires = local.expires
+    }
+  }
+
+  lifecycle {
+    # The expiry date is set once, at creation; later plans must not move it.
+    ignore_changes = [metadata[0].labels["expires"]]
+  }
+}
+
+# The GHCR package is private, and the kubelet only lets a pod use an image
+# pulled with credentials if the pod has credentials too. The token is a
+# write-only argument fed by an ephemeral variable: it is sent to Kubernetes
+# but never written to the plan or the state.
+resource "kubernetes_secret" "ghcr_pull" {
+  metadata {
+    name      = "ghcr-pull"
+    namespace = kubernetes_namespace.preview.metadata[0].name
+  }
+
+  type = "kubernetes.io/dockerconfigjson"
+
+  data_wo = {
+    ".dockerconfigjson" = jsonencode({
+      auths = {
+        "ghcr.io" = {
+          auth = base64encode("${var.ghcr_user}:${var.ghcr_token}")
+        }
+      }
+    })
+  }
+  # Write-only values are not compared between runs: increase this number to
+  # push a rotated token.
+  data_wo_revision = 1
+}
+
+resource "kubernetes_deployment" "app" {
+  # Checkov cannot see through var.image; both points are enforced elsewhere.
+  #checkov:skip=CKV_K8S_14:var.image validation rejects :latest and untagged images
+  #checkov:skip=CKV_K8S_43:tags are full commit SHAs, never reused (docs/image-registry.md)
+  metadata {
+    name      = "myapp"
+    namespace = kubernetes_namespace.preview.metadata[0].name
+    labels    = local.app
+  }
+
+  spec {
+    replicas = 1
+
+    selector {
+      match_labels = local.app
+    }
+
+    template {
+      metadata {
+        labels = local.app
+      }
+
+      spec {
+        automount_service_account_token = false
+
+        image_pull_secrets {
+          name = kubernetes_secret.ghcr_pull.metadata[0].name
+        }
+
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 1000 # "node" in the image; must be numeric for run_as_non_root
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
+        container {
+          name  = "myapp"
+          image = var.image
+          # Always: every new pod authenticates to the registry with its own
+          # pull secret, even when the image is already cached on the node.
+          image_pull_policy = "Always"
+
+          port {
+            name           = "http"
+            container_port = 3000
+          }
+
+          env {
+            name  = "APP_ENV"
+            value = local.namespace
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = "http"
+            }
+            initial_delay_seconds = 2
+            period_seconds        = 5
+          }
+
+          liveness_probe {
+            http_get {
+              path = "/health"
+              port = "http"
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+          }
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "250m"
+              memory = "128Mi"
+            }
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+        }
+      }
+    }
+  }
+
+  # A preview that cannot start should fail the pipeline quickly.
+  timeouts {
+    create = "3m"
+    update = "3m"
+  }
+}
+
+resource "kubernetes_service" "app" {
+  metadata {
+    name      = "myapp"
+    namespace = kubernetes_namespace.preview.metadata[0].name
+    labels    = local.app
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = local.app
+
+    port {
+      name        = "http"
+      port        = 80
+      target_port = "http"
+    }
+  }
+}
+
+==> infra/preview/variables.tf <==
+variable "pr_number" {
+  description = "Pull Request number; the namespace is pr-<pr_number>."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.pr_number))
+    error_message = "pr_number must be a Pull Request number (digits only)."
+  }
+}
+
+variable "image" {
+  description = "Image to preview, pinned to a tag or digest (the commit SHA of the PR), never :latest."
+  type        = string
+
+  validation {
+    condition     = can(regex("[:@][^/]+$", var.image)) && !endswith(var.image, ":latest")
+    error_message = "image must carry an explicit tag or digest other than latest."
+  }
+}
+
+variable "owner" {
+  description = "Who is responsible for the preview (for example the PR author); a namespace label."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$", var.owner))
+    error_message = "owner must be a valid Kubernetes label value (63 characters max, letters, digits, '-', '_', '.')."
+  }
+}
+
+variable "ttl_days" {
+  description = "Days until the preview expires; written once to the expires label."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.ttl_days >= 1 && var.ttl_days <= 14
+    error_message = "ttl_days must be between 1 and 14."
+  }
+}
+
+variable "kube_context" {
+  description = "kubeconfig context of the cluster that hosts the previews."
+  type        = string
+  default     = "kind-devops-lab"
+}
+
+variable "ghcr_user" {
+  description = "GitHub user that owns the GHCR pull token."
+  type        = string
+  default     = "Valentin-Meltz"
+}
+
+variable "ghcr_token" {
+  description = "GHCR token with the read:packages scope. Pass it as TF_VAR_ghcr_token; it is never stored."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+}
+
+==> infra/preview/outputs.tf <==
+output "namespace" {
+  value = kubernetes_namespace.preview.metadata[0].name
+}
+
+output "expires" {
+  value = kubernetes_namespace.preview.metadata[0].labels["expires"]
+}
+
+output "service_url" {
+  description = "URL of the preview inside the cluster."
+  value       = "http://${kubernetes_service.app.metadata[0].name}.${kubernetes_namespace.preview.metadata[0].name}.svc.cluster.local"
+}
+
+output "port_forward" {
+  description = "Command to reach the preview from this machine on http://localhost:8080."
+  value       = "kubectl --context ${var.kube_context} port-forward -n ${kubernetes_namespace.preview.metadata[0].name} svc/${kubernetes_service.app.metadata[0].name} 8080:80"
+}
+
+$ terraform fmt -check -recursive infra/preview && echo 'fmt: all files formatted'
+fmt: all files formatted
+
+# 4.2 PR 42 (release v1.1.0), with its own state file state/pr-42.tfstate
+
+$ terraform -chdir=infra/preview init -reconfigure -backend-config=path=state/pr-42.tfstate -no-color -input=false
+Initializing the backend...
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Reusing version 2.38.0 of hashicorp/kubernetes from the dependency lock file
+- Using previously-installed hashicorp/kubernetes v2.38.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+$ terraform -chdir=infra/preview validate -no-color
+Success! The configuration is valid.
+
+
+$ terraform -chdir=infra/preview apply -var pr_number=42 -var image=ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22 -var owner=Valentin-Meltz -no-color -input=false -auto-approve
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # kubernetes_deployment.app will be created
+  + resource "kubernetes_deployment" "app" {
+      + id               = (known after apply)
+      + wait_for_rollout = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "app" = "myapp"
+            }
+          + name             = "myapp"
+          + namespace        = "pr-42"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+
+      + spec {
+          + min_ready_seconds         = 0
+          + paused                    = false
+          + progress_deadline_seconds = 600
+          + replicas                  = "1"
+          + revision_history_limit    = 10
+
+          + selector {
+              + match_labels = {
+                  + "app" = "myapp"
+                }
+            }
+
+          + strategy (known after apply)
+
+          + template {
+              + metadata {
+                  + generation       = (known after apply)
+                  + labels           = {
+                      + "app" = "myapp"
+                    }
+                  + name             = (known after apply)
+                  + resource_version = (known after apply)
+                  + uid              = (known after apply)
+                }
+              + spec {
+                  + automount_service_account_token  = false
+                  + dns_policy                       = "ClusterFirst"
+                  + enable_service_links             = true
+                  + host_ipc                         = false
+                  + host_network                     = false
+                  + host_pid                         = false
+                  + hostname                         = (known after apply)
+                  + node_name                        = (known after apply)
+                  + restart_policy                   = "Always"
+                  + scheduler_name                   = (known after apply)
+                  + service_account_name             = (known after apply)
+                  + share_process_namespace          = false
+                  + termination_grace_period_seconds = 30
+
+                  + container {
+                      + image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22"
+                      + image_pull_policy          = "Always"
+                      + name                       = "myapp"
+                      + stdin                      = false
+                      + stdin_once                 = false
+                      + termination_message_path   = "/dev/termination-log"
+                      + termination_message_policy = (known after apply)
+                      + tty                        = false
+
+                      + env {
+                          + name  = "APP_ENV"
+                          + value = "pr-42"
+                        }
+
+                      + liveness_probe {
+                          + failure_threshold     = 3
+                          + initial_delay_seconds = 10
+                          + period_seconds        = 10
+                          + success_threshold     = 1
+                          + timeout_seconds       = 1
+
+                          + http_get {
+                              + path   = "/health"
+                              + port   = "http"
+                              + scheme = "HTTP"
+                            }
+                        }
+
+                      + port {
+                          + container_port = 3000
+                          + name           = "http"
+                          + protocol       = "TCP"
+                        }
+
+                      + readiness_probe {
+                          + failure_threshold     = 3
+                          + initial_delay_seconds = 2
+                          + period_seconds        = 5
+                          + success_threshold     = 1
+                          + timeout_seconds       = 1
+
+                          + http_get {
+                              + path   = "/health"
+                              + port   = "http"
+                              + scheme = "HTTP"
+                            }
+                        }
+
+                      + resources {
+                          + limits   = {
+                              + "cpu"    = "250m"
+                              + "memory" = "128Mi"
+                            }
+                          + requests = {
+                              + "cpu"    = "50m"
+                              + "memory" = "64Mi"
+                            }
+                        }
+
+                      + security_context {
+                          + allow_privilege_escalation = false
+                          + privileged                 = false
+                          + read_only_root_filesystem  = true
+
+                          + capabilities {
+                              + drop = [
+                                  + "ALL",
+                                ]
+                            }
+                        }
+                    }
+
+                  + image_pull_secrets {
+                      + name = "ghcr-pull"
+                    }
+
+                  + readiness_gate (known after apply)
+
+                  + security_context {
+                      + run_as_non_root = true
+                      + run_as_user     = "1000"
+
+                      + seccomp_profile {
+                          + type = "RuntimeDefault"
+                        }
+                    }
+                }
+            }
+        }
+
+      + timeouts {
+          + create = "3m"
+          + update = "3m"
+        }
+    }
+
+  # kubernetes_namespace.preview will be created
+  + resource "kubernetes_namespace" "preview" {
+      + id                               = (known after apply)
+      + wait_for_default_service_account = false
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "expires" = "2026-11-27"
+              + "owner"   = "Valentin-Meltz"
+              + "pr"      = "42"
+              + "purpose" = "preview"
+            }
+          + name             = "pr-42"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+    }
+
+  # kubernetes_secret.ghcr_pull will be created
+  + resource "kubernetes_secret" "ghcr_pull" {
+      + binary_data_wo                 = (write-only attribute)
+      + data                           = (sensitive value)
+      + data_wo                        = (write-only attribute)
+      + data_wo_revision               = 1
+      + id                             = (known after apply)
+      + type                           = "kubernetes.io/dockerconfigjson"
+      + wait_for_service_account_token = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + name             = "ghcr-pull"
+          + namespace        = "pr-42"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+    }
+
+  # kubernetes_service.app will be created
+  + resource "kubernetes_service" "app" {
+      + id                     = (known after apply)
+      + status                 = (known after apply)
+      + wait_for_load_balancer = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "app" = "myapp"
+            }
+          + name             = "myapp"
+          + namespace        = "pr-42"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+
+      + spec {
+          + allocate_load_balancer_node_ports = true
+          + cluster_ip                        = (known after apply)
+          + cluster_ips                       = (known after apply)
+          + external_traffic_policy           = (known after apply)
+          + health_check_node_port            = (known after apply)
+          + internal_traffic_policy           = (known after apply)
+          + ip_families                       = (known after apply)
+          + ip_family_policy                  = (known after apply)
+          + publish_not_ready_addresses       = false
+          + selector                          = {
+              + "app" = "myapp"
+            }
+          + session_affinity                  = "None"
+          + type                              = "ClusterIP"
+
+          + port {
+              + name        = "http"
+              + node_port   = (known after apply)
+              + port        = 80
+              + protocol    = "TCP"
+              + target_port = "http"
+            }
+
+          + session_affinity_config (known after apply)
+        }
+    }
+
+Plan: 4 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + expires      = "2026-11-27"
+  + namespace    = "pr-42"
+  + port_forward = "kubectl --context kind-devops-lab port-forward -n pr-42 svc/myapp 8080:80"
+  + service_url  = "http://myapp.pr-42.svc.cluster.local"
+kubernetes_namespace.preview: Creating...
+kubernetes_namespace.preview: Creation complete after 0s [id=pr-42]
+kubernetes_secret.ghcr_pull: Creating...
+kubernetes_service.app: Creating...
+kubernetes_secret.ghcr_pull: Creation complete after 0s [id=pr-42/ghcr-pull]
+kubernetes_service.app: Creation complete after 0s [id=pr-42/myapp]
+kubernetes_deployment.app: Creating...
+kubernetes_deployment.app: Creation complete after 8s [id=pr-42/myapp]
+
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+expires = "2026-11-27"
+namespace = "pr-42"
+port_forward = "kubectl --context kind-devops-lab port-forward -n pr-42 svc/myapp 8080:80"
+service_url = "http://myapp.pr-42.svc.cluster.local"
+
+# A second plan is empty (exit code 0): the expiry date stays as stamped at creation
+
+$ terraform -chdir=infra/preview plan -var pr_number=42 -var image=ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22 -var owner=Valentin-Meltz -no-color -input=false -detailed-exitcode >/dev/null; echo "exit code: $?"
+exit code: 0
+
+$ kubectl --context kind-devops-lab get all -n pr-42
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-7946d489dc-wtxbj   1/1     Running   0          8s
+
+NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.172.114   <none>        80/TCP    8s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   1/1     1            1           8s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-7946d489dc   1         1         1       8s
+
+$ kubectl --context kind-devops-lab get secret ghcr-pull -n pr-42
+NAME        TYPE                             DATA   AGE
+ghcr-pull   kubernetes.io/dockerconfigjson   1      8s
+
+# port-forward svc/myapp in pr-42 to localhost:18042 (background)
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18042/; echo
+{"service":"myapp","version":"1.1.0","commit":"982483e48711ca36531464c164ad73718640ee22","environment":"pr-42","apiKeyConfigured":false,"pod":"myapp-7946d489dc-wtxbj"}
+
+$ curl -si http://localhost:18042/health | sed -n '1p;$p'; echo
+HTTP/1.1 200 OK
+OK
+
+# Switching PR without -reconfigure: init refuses, because the other path would mean migrating pr-42's state into pr-43's
+
+$ terraform -chdir=infra/preview init -backend-config=path=state/pr-43.tfstate -no-color -input=false
+Initializing the backend...
+
+
+Error: Backend configuration changed
+
+A change in the backend configuration has been detected, which may require
+migrating existing state.
+
+If you wish to attempt automatic migration of the state, run "terraform init
+-migrate-state".
+If you wish to store the current configuration with no changes to the state,
+run "terraform init -reconfigure".
+
+# 4.3 PR 43 (release v1.0.0), with its own state file state/pr-43.tfstate
+
+$ terraform -chdir=infra/preview init -reconfigure -backend-config=path=state/pr-43.tfstate -no-color -input=false
+Initializing the backend...
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Reusing version 2.38.0 of hashicorp/kubernetes from the dependency lock file
+- Using previously-installed hashicorp/kubernetes v2.38.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+$ terraform -chdir=infra/preview apply -var pr_number=43 -var image=ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df -var owner=Valentin-Meltz -no-color -input=false -auto-approve
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # kubernetes_deployment.app will be created
+  + resource "kubernetes_deployment" "app" {
+      + id               = (known after apply)
+      + wait_for_rollout = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "app" = "myapp"
+            }
+          + name             = "myapp"
+          + namespace        = "pr-43"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+
+      + spec {
+          + min_ready_seconds         = 0
+          + paused                    = false
+          + progress_deadline_seconds = 600
+          + replicas                  = "1"
+          + revision_history_limit    = 10
+
+          + selector {
+              + match_labels = {
+                  + "app" = "myapp"
+                }
+            }
+
+          + strategy (known after apply)
+
+          + template {
+              + metadata {
+                  + generation       = (known after apply)
+                  + labels           = {
+                      + "app" = "myapp"
+                    }
+                  + name             = (known after apply)
+                  + resource_version = (known after apply)
+                  + uid              = (known after apply)
+                }
+              + spec {
+                  + automount_service_account_token  = false
+                  + dns_policy                       = "ClusterFirst"
+                  + enable_service_links             = true
+                  + host_ipc                         = false
+                  + host_network                     = false
+                  + host_pid                         = false
+                  + hostname                         = (known after apply)
+                  + node_name                        = (known after apply)
+                  + restart_policy                   = "Always"
+                  + scheduler_name                   = (known after apply)
+                  + service_account_name             = (known after apply)
+                  + share_process_namespace          = false
+                  + termination_grace_period_seconds = 30
+
+                  + container {
+                      + image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df"
+                      + image_pull_policy          = "Always"
+                      + name                       = "myapp"
+                      + stdin                      = false
+                      + stdin_once                 = false
+                      + termination_message_path   = "/dev/termination-log"
+                      + termination_message_policy = (known after apply)
+                      + tty                        = false
+
+                      + env {
+                          + name  = "APP_ENV"
+                          + value = "pr-43"
+                        }
+
+                      + liveness_probe {
+                          + failure_threshold     = 3
+                          + initial_delay_seconds = 10
+                          + period_seconds        = 10
+                          + success_threshold     = 1
+                          + timeout_seconds       = 1
+
+                          + http_get {
+                              + path   = "/health"
+                              + port   = "http"
+                              + scheme = "HTTP"
+                            }
+                        }
+
+                      + port {
+                          + container_port = 3000
+                          + name           = "http"
+                          + protocol       = "TCP"
+                        }
+
+                      + readiness_probe {
+                          + failure_threshold     = 3
+                          + initial_delay_seconds = 2
+                          + period_seconds        = 5
+                          + success_threshold     = 1
+                          + timeout_seconds       = 1
+
+                          + http_get {
+                              + path   = "/health"
+                              + port   = "http"
+                              + scheme = "HTTP"
+                            }
+                        }
+
+                      + resources {
+                          + limits   = {
+                              + "cpu"    = "250m"
+                              + "memory" = "128Mi"
+                            }
+                          + requests = {
+                              + "cpu"    = "50m"
+                              + "memory" = "64Mi"
+                            }
+                        }
+
+                      + security_context {
+                          + allow_privilege_escalation = false
+                          + privileged                 = false
+                          + read_only_root_filesystem  = true
+
+                          + capabilities {
+                              + drop = [
+                                  + "ALL",
+                                ]
+                            }
+                        }
+                    }
+
+                  + image_pull_secrets {
+                      + name = "ghcr-pull"
+                    }
+
+                  + readiness_gate (known after apply)
+
+                  + security_context {
+                      + run_as_non_root = true
+                      + run_as_user     = "1000"
+
+                      + seccomp_profile {
+                          + type = "RuntimeDefault"
+                        }
+                    }
+                }
+            }
+        }
+
+      + timeouts {
+          + create = "3m"
+          + update = "3m"
+        }
+    }
+
+  # kubernetes_namespace.preview will be created
+  + resource "kubernetes_namespace" "preview" {
+      + id                               = (known after apply)
+      + wait_for_default_service_account = false
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "expires" = "2026-11-27"
+              + "owner"   = "Valentin-Meltz"
+              + "pr"      = "43"
+              + "purpose" = "preview"
+            }
+          + name             = "pr-43"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+    }
+
+  # kubernetes_secret.ghcr_pull will be created
+  + resource "kubernetes_secret" "ghcr_pull" {
+      + binary_data_wo                 = (write-only attribute)
+      + data                           = (sensitive value)
+      + data_wo                        = (write-only attribute)
+      + data_wo_revision               = 1
+      + id                             = (known after apply)
+      + type                           = "kubernetes.io/dockerconfigjson"
+      + wait_for_service_account_token = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + name             = "ghcr-pull"
+          + namespace        = "pr-43"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+    }
+
+  # kubernetes_service.app will be created
+  + resource "kubernetes_service" "app" {
+      + id                     = (known after apply)
+      + status                 = (known after apply)
+      + wait_for_load_balancer = true
+
+      + metadata {
+          + generation       = (known after apply)
+          + labels           = {
+              + "app" = "myapp"
+            }
+          + name             = "myapp"
+          + namespace        = "pr-43"
+          + resource_version = (known after apply)
+          + uid              = (known after apply)
+        }
+
+      + spec {
+          + allocate_load_balancer_node_ports = true
+          + cluster_ip                        = (known after apply)
+          + cluster_ips                       = (known after apply)
+          + external_traffic_policy           = (known after apply)
+          + health_check_node_port            = (known after apply)
+          + internal_traffic_policy           = (known after apply)
+          + ip_families                       = (known after apply)
+          + ip_family_policy                  = (known after apply)
+          + publish_not_ready_addresses       = false
+          + selector                          = {
+              + "app" = "myapp"
+            }
+          + session_affinity                  = "None"
+          + type                              = "ClusterIP"
+
+          + port {
+              + name        = "http"
+              + node_port   = (known after apply)
+              + port        = 80
+              + protocol    = "TCP"
+              + target_port = "http"
+            }
+
+          + session_affinity_config (known after apply)
+        }
+    }
+
+Plan: 4 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + expires      = "2026-11-27"
+  + namespace    = "pr-43"
+  + port_forward = "kubectl --context kind-devops-lab port-forward -n pr-43 svc/myapp 8080:80"
+  + service_url  = "http://myapp.pr-43.svc.cluster.local"
+kubernetes_namespace.preview: Creating...
+kubernetes_namespace.preview: Creation complete after 0s [id=pr-43]
+kubernetes_secret.ghcr_pull: Creating...
+kubernetes_service.app: Creating...
+kubernetes_secret.ghcr_pull: Creation complete after 0s [id=pr-43/ghcr-pull]
+kubernetes_service.app: Creation complete after 0s [id=pr-43/myapp]
+kubernetes_deployment.app: Creating...
+kubernetes_deployment.app: Still creating... [00m10s elapsed]
+kubernetes_deployment.app: Creation complete after 16s [id=pr-43/myapp]
+
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+expires = "2026-11-27"
+namespace = "pr-43"
+port_forward = "kubectl --context kind-devops-lab port-forward -n pr-43 svc/myapp 8080:80"
+service_url = "http://myapp.pr-43.svc.cluster.local"
+
+$ kubectl --context kind-devops-lab get all -n pr-43
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-69dcfc4cbb-xpbxc   1/1     Running   0          15s
+
+NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.105.63   <none>        80/TCP    15s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   1/1     1            1           15s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-69dcfc4cbb   1         1         1       15s
+
+# port-forward svc/myapp in pr-43 to localhost:18043 (background)
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18043/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-69dcfc4cbb-xpbxc"}
+
+$ curl -si http://localhost:18043/health | sed -n '1p;$p'; echo
+HTTP/1.1 200 OK
+OK
+
+# 4.3 Isolation: one namespace and one state file per PR, same resource names, different releases
+
+$ kubectl --context kind-devops-lab get namespaces -l purpose=preview -L pr,owner,expires
+NAME    STATUS   AGE   PR    OWNER            EXPIRES
+pr-42   Active   27s   42    Valentin-Meltz   2026-11-27
+pr-43   Active   17s   43    Valentin-Meltz   2026-11-27
+
+$ kubectl --context kind-devops-lab get deployments -A -l app=myapp -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
+NAMESPACE   NAME    IMAGE
+dev         myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22
+pr-42       myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22
+pr-43       myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+prod        myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+staging     myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df
+
+$ ls -lan infra/preview/state
+total 96
+drwxr-xr-x@ 6 501  20    192 Nov 24 11:34 .
+drwxr-xr-x@ 8 501  20    256 Nov 24 11:33 ..
+-rw-r--r--@ 1 501  20  17731 Nov 24 11:34 pr-42.tfstate
+-rw-r--r--@ 1 501  20    685 Nov 24 11:33 pr-42.tfstate.backup
+-rw-r--r--@ 1 501  20  17729 Nov 24 11:34 pr-43.tfstate
+-rw-r--r--@ 1 501  20    685 Nov 24 11:34 pr-43.tfstate.backup
+
+$ terraform -chdir=infra/preview state list
+kubernetes_deployment.app
+kubernetes_namespace.preview
+kubernetes_secret.ghcr_pull
+kubernetes_service.app
+
+$ terraform -chdir=infra/preview output -no-color
+expires = "2026-11-27"
+namespace = "pr-43"
+port_forward = "kubectl --context kind-devops-lab port-forward -n pr-43 svc/myapp 8080:80"
+service_url = "http://myapp.pr-43.svc.cluster.local"
+
+# The GHCR token is a write-only value: in both states the secret has no data, and the token appears 0 times (raw or base64 in the docker config)
+
+$ jq ".resources[] | select(.type==\"kubernetes_secret\") | .instances[0].attributes | {type, data, data_wo, data_wo_revision}" infra/preview/state/pr-43.tfstate
+{
+  "type": "kubernetes.io/dockerconfigjson",
+  "data": null,
+  "data_wo": null,
+  "data_wo_revision": 1
+}
+
+$ grep -cF -- "$TF_VAR_ghcr_token" infra/preview/state/pr-42.tfstate infra/preview/state/pr-43.tfstate
+infra/preview/state/pr-42.tfstate:0
+infra/preview/state/pr-43.tfstate:0
+
+$ grep -cF -- "$(printf "%s:%s" Valentin-Meltz "$TF_VAR_ghcr_token" | base64)" infra/preview/state/pr-42.tfstate infra/preview/state/pr-43.tfstate
+infra/preview/state/pr-42.tfstate:0
+infra/preview/state/pr-43.tfstate:0
+
+# 4.4 Destroy PR 42: select its state, then destroy
+
+$ terraform -chdir=infra/preview init -reconfigure -backend-config=path=state/pr-42.tfstate -no-color -input=false
+Initializing the backend...
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Reusing version 2.38.0 of hashicorp/kubernetes from the dependency lock file
+- Using previously-installed hashicorp/kubernetes v2.38.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+$ terraform -chdir=infra/preview output -no-color namespace
+"pr-42"
+
+$ terraform -chdir=infra/preview destroy -var pr_number=42 -var image=ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22 -var owner=Valentin-Meltz -no-color -input=false -auto-approve
+kubernetes_namespace.preview: Refreshing state... [id=pr-42]
+kubernetes_secret.ghcr_pull: Refreshing state... [id=pr-42/ghcr-pull]
+kubernetes_service.app: Refreshing state... [id=pr-42/myapp]
+kubernetes_deployment.app: Refreshing state... [id=pr-42/myapp]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  - destroy
+
+Terraform will perform the following actions:
+
+  # kubernetes_deployment.app will be destroyed
+  - resource "kubernetes_deployment" "app" {
+      - id               = "pr-42/myapp" -> null
+      - wait_for_rollout = true -> null
+
+      - metadata {
+          - annotations      = {} -> null
+          - generation       = 1 -> null
+          - labels           = {
+              - "app" = "myapp"
+            } -> null
+          - name             = "myapp" -> null
+          - namespace        = "pr-42" -> null
+          - resource_version = "60229" -> null
+          - uid              = "c4f32f28-f378-4162-a7f1-e5dd5e0e5454" -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - spec {
+          - min_ready_seconds         = 0 -> null
+          - paused                    = false -> null
+          - progress_deadline_seconds = 600 -> null
+          - replicas                  = "1" -> null
+          - revision_history_limit    = 10 -> null
+
+          - selector {
+              - match_labels = {
+                  - "app" = "myapp"
+                } -> null
+            }
+
+          - strategy {
+              - type = "RollingUpdate" -> null
+
+              - rolling_update {
+                  - max_surge       = "25%" -> null
+                  - max_unavailable = "25%" -> null
+                }
+            }
+
+          - template {
+              - metadata {
+                  - annotations      = {} -> null
+                  - generation       = 0 -> null
+                  - labels           = {
+                      - "app" = "myapp"
+                    } -> null
+                    name             = null
+                    # (4 unchanged attributes hidden)
+                }
+              - spec {
+                  - active_deadline_seconds          = 0 -> null
+                  - automount_service_account_token  = false -> null
+                  - dns_policy                       = "ClusterFirst" -> null
+                  - enable_service_links             = true -> null
+                  - host_ipc                         = false -> null
+                  - host_network                     = false -> null
+                  - host_pid                         = false -> null
+                  - node_selector                    = {} -> null
+                  - restart_policy                   = "Always" -> null
+                  - scheduler_name                   = "default-scheduler" -> null
+                  - share_process_namespace          = false -> null
+                  - termination_grace_period_seconds = 30 -> null
+                    # (6 unchanged attributes hidden)
+
+                  - container {
+                      - args                       = [] -> null
+                      - command                    = [] -> null
+                      - image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22" -> null
+                      - image_pull_policy          = "Always" -> null
+                      - name                       = "myapp" -> null
+                      - stdin                      = false -> null
+                      - stdin_once                 = false -> null
+                      - termination_message_path   = "/dev/termination-log" -> null
+                      - termination_message_policy = "File" -> null
+                      - tty                        = false -> null
+                        # (1 unchanged attribute hidden)
+
+                      - env {
+                          - name  = "APP_ENV" -> null
+                          - value = "pr-42" -> null
+                        }
+
+                      - liveness_probe {
+                          - failure_threshold     = 3 -> null
+                          - initial_delay_seconds = 10 -> null
+                          - period_seconds        = 10 -> null
+                          - success_threshold     = 1 -> null
+                          - timeout_seconds       = 1 -> null
+
+                          - http_get {
+                              - path   = "/health" -> null
+                              - port   = "http" -> null
+                              - scheme = "HTTP" -> null
+                                # (1 unchanged attribute hidden)
+                            }
+                        }
+
+                      - port {
+                          - container_port = 3000 -> null
+                          - host_port      = 0 -> null
+                          - name           = "http" -> null
+                          - protocol       = "TCP" -> null
+                            # (1 unchanged attribute hidden)
+                        }
+
+                      - readiness_probe {
+                          - failure_threshold     = 3 -> null
+                          - initial_delay_seconds = 2 -> null
+                          - period_seconds        = 5 -> null
+                          - success_threshold     = 1 -> null
+                          - timeout_seconds       = 1 -> null
+
+                          - http_get {
+                              - path   = "/health" -> null
+                              - port   = "http" -> null
+                              - scheme = "HTTP" -> null
+                                # (1 unchanged attribute hidden)
+                            }
+                        }
+
+                      - resources {
+                          - limits   = {
+                              - "cpu"    = "250m"
+                              - "memory" = "128Mi"
+                            } -> null
+                          - requests = {
+                              - "cpu"    = "50m"
+                              - "memory" = "64Mi"
+                            } -> null
+                        }
+
+                      - security_context {
+                          - allow_privilege_escalation = false -> null
+                          - privileged                 = false -> null
+                          - read_only_root_filesystem  = true -> null
+                          - run_as_non_root            = false -> null
+                            # (2 unchanged attributes hidden)
+
+                          - capabilities {
+                              - add  = [] -> null
+                              - drop = [
+                                  - "ALL",
+                                ] -> null
+                            }
+                        }
+                    }
+
+                  - image_pull_secrets {
+                      - name = "ghcr-pull" -> null
+                    }
+
+                  - security_context {
+                      - run_as_non_root        = true -> null
+                      - run_as_user            = "1000" -> null
+                      - supplemental_groups    = [] -> null
+                        # (3 unchanged attributes hidden)
+
+                      - seccomp_profile {
+                          - type              = "RuntimeDefault" -> null
+                            # (1 unchanged attribute hidden)
+                        }
+                    }
+                }
+            }
+        }
+
+      - timeouts {
+          - create = "3m" -> null
+          - update = "3m" -> null
+        }
+    }
+
+  # kubernetes_namespace.preview will be destroyed
+  - resource "kubernetes_namespace" "preview" {
+      - id                               = "pr-42" -> null
+      - wait_for_default_service_account = false -> null
+
+      - metadata {
+          - annotations      = {} -> null
+          - generation       = 0 -> null
+          - labels           = {
+              - "expires" = "2026-11-27"
+              - "owner"   = "Valentin-Meltz"
+              - "pr"      = "42"
+              - "purpose" = "preview"
+            } -> null
+          - name             = "pr-42" -> null
+          - resource_version = "60187" -> null
+          - uid              = "c4ec370d-462c-4346-b595-3b45833e9f1b" -> null
+            # (1 unchanged attribute hidden)
+        }
+    }
+
+  # kubernetes_secret.ghcr_pull will be destroyed
+  - resource "kubernetes_secret" "ghcr_pull" {
+      - binary_data_wo                 = (write-only attribute) -> null
+      - data_wo                        = (write-only attribute) -> null
+      - data_wo_revision               = 1 -> null
+      - id                             = "pr-42/ghcr-pull" -> null
+      - immutable                      = false -> null
+      - type                           = "kubernetes.io/dockerconfigjson" -> null
+      - wait_for_service_account_token = true -> null
+
+      - metadata {
+          - annotations      = {} -> null
+          - generation       = 0 -> null
+          - labels           = {} -> null
+          - name             = "ghcr-pull" -> null
+          - namespace        = "pr-42" -> null
+          - resource_version = "60190" -> null
+          - uid              = "4275365b-019b-4a50-b567-7738b412a35a" -> null
+            # (1 unchanged attribute hidden)
+        }
+    }
+
+  # kubernetes_service.app will be destroyed
+  - resource "kubernetes_service" "app" {
+      - id                     = "pr-42/myapp" -> null
+      - status                 = [
+          - {
+              - load_balancer = [
+                  - {
+                      - ingress = []
+                    },
+                ]
+            },
+        ] -> null
+      - wait_for_load_balancer = true -> null
+
+      - metadata {
+          - annotations      = {} -> null
+          - generation       = 0 -> null
+          - labels           = {
+              - "app" = "myapp"
+            } -> null
+          - name             = "myapp" -> null
+          - namespace        = "pr-42" -> null
+          - resource_version = "60192" -> null
+          - uid              = "62183051-6465-487f-a2d5-228b1f4a2eba" -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - spec {
+          - allocate_load_balancer_node_ports = true -> null
+          - cluster_ip                        = "10.96.172.114" -> null
+          - cluster_ips                       = [
+              - "10.96.172.114",
+            ] -> null
+          - external_ips                      = [] -> null
+          - health_check_node_port            = 0 -> null
+          - internal_traffic_policy           = "Cluster" -> null
+          - ip_families                       = [
+              - "IPv4",
+            ] -> null
+          - ip_family_policy                  = "SingleStack" -> null
+          - load_balancer_source_ranges       = [] -> null
+          - publish_not_ready_addresses       = false -> null
+          - selector                          = {
+              - "app" = "myapp"
+            } -> null
+          - session_affinity                  = "None" -> null
+          - type                              = "ClusterIP" -> null
+            # (4 unchanged attributes hidden)
+
+          - port {
+              - name         = "http" -> null
+              - node_port    = 0 -> null
+              - port         = 80 -> null
+              - protocol     = "TCP" -> null
+              - target_port  = "http" -> null
+                # (1 unchanged attribute hidden)
+            }
+        }
+    }
+
+Plan: 0 to add, 0 to change, 4 to destroy.
+
+Changes to Outputs:
+  - expires      = "2026-11-27" -> null
+  - namespace    = "pr-42" -> null
+  - port_forward = "kubectl --context kind-devops-lab port-forward -n pr-42 svc/myapp 8080:80" -> null
+  - service_url  = "http://myapp.pr-42.svc.cluster.local" -> null
+kubernetes_service.app: Destroying... [id=pr-42/myapp]
+kubernetes_deployment.app: Destroying... [id=pr-42/myapp]
+kubernetes_deployment.app: Destruction complete after 0s
+kubernetes_service.app: Destruction complete after 0s
+kubernetes_secret.ghcr_pull: Destroying... [id=pr-42/ghcr-pull]
+kubernetes_secret.ghcr_pull: Destruction complete after 0s
+kubernetes_namespace.preview: Destroying... [id=pr-42]
+kubernetes_namespace.preview: Destruction complete after 6s
+
+Destroy complete! Resources: 4 destroyed.
+
+$ kubectl --context kind-devops-lab get namespace pr-42
+Error from server (NotFound): namespaces "pr-42" not found
+
+$ kubectl --context kind-devops-lab get all,secrets -n pr-42
+No resources found in pr-42 namespace.
+
+$ jq '.resources | length' infra/preview/state/pr-42.tfstate
+0
+
+# PR 43 is untouched
+
+$ kubectl --context kind-devops-lab get all -n pr-43
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-69dcfc4cbb-xpbxc   1/1     Running   0          24s
+
+NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/myapp   ClusterIP   10.96.105.63   <none>        80/TCP    24s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/myapp   1/1     1            1           24s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-69dcfc4cbb   1         1         1       24s
+
+# port-forward svc/myapp in pr-43 to localhost:18043 (background)
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18043/; echo
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-69dcfc4cbb-xpbxc"}
+
+$ curl -si http://localhost:18043/health | sed -n '1p;$p'; echo
+HTTP/1.1 200 OK
+OK
+
+$ kubectl --context kind-devops-lab get namespaces -l purpose=preview -L pr,owner,expires
+NAME    STATUS   AGE   PR    OWNER            EXPIRES
+pr-43   Active   25s   43    Valentin-Meltz   2026-11-27
+
+# 4.5 / Q6: the labels let a scheduled cleanup job find expired previews (today, then a simulated later date)
+
+$ kubectl --context kind-devops-lab get namespaces -l purpose=preview -o json | jq -r --arg today "$(date -u +%F)" '.items[] | select(.metadata.labels.expires < $today) | "\(.metadata.name) owner=\(.metadata.labels.owner) expired=\(.metadata.labels.expires)"' | grep . || echo 'no expired preview'
+no expired preview
+
+$ kubectl --context kind-devops-lab get namespaces -l purpose=preview -o json | jq -r --arg today 2026-12-31 '.items[] | select(.metadata.labels.expires < $today) | "\(.metadata.name) owner=\(.metadata.labels.owner) expired=\(.metadata.labels.expires)"' | grep . || echo 'no expired preview'
+pr-43 owner=Valentin-Meltz expired=2026-11-27
