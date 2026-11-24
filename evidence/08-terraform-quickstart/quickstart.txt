@@ -1,0 +1,670 @@
+### 08 - Terraform quickstart (Docker provider)
+### 2026-11-24T09:34:16Z | Terraform v1.17.2, docker 28.4.0
+
+# Reset before this run: previous resources destroyed, main.tf back to external = 8081
+
+$ cat infra/quickstart/main.tf
+terraform {
+  required_providers {
+    docker = {
+      source  = "kreuzwerker/docker"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "docker" {}
+
+resource "docker_image" "nginx" {
+  name = "nginx:1.27"
+}
+
+resource "docker_container" "web" {
+  name  = "tf-web"
+  image = docker_image.nginx.image_id
+  ports {
+    internal = 80
+    external = 8081
+  }
+}
+
+# 1.1 init, fmt, validate, plan
+
+$ terraform -chdir=infra/quickstart init -no-color -input=false
+Initializing the backend...
+
+Initializing provider plugins...
+- Reusing version 3.9.0 of kreuzwerker/docker from the dependency lock file
+- Using previously-installed kreuzwerker/docker v3.9.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+$ terraform -chdir=infra/quickstart fmt -check -diff && echo 'fmt: already formatted'
+fmt: already formatted
+
+$ terraform -chdir=infra/quickstart validate -no-color
+Success! The configuration is valid.
+
+
+$ terraform -chdir=infra/quickstart plan -no-color -input=false
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = (known after apply)
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "tf-web"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8081
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+  # docker_image.nginx will be created
+  + resource "docker_image" "nginx" {
+      + id          = (known after apply)
+      + image_id    = (known after apply)
+      + name        = "nginx:1.27"
+      + repo_digest = (known after apply)
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
+
+# 1.2 Apply, then check the container
+
+$ terraform -chdir=infra/quickstart apply -auto-approve -no-color -input=false
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = (known after apply)
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "tf-web"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8081
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+  # docker_image.nginx will be created
+  + resource "docker_image" "nginx" {
+      + id          = (known after apply)
+      + image_id    = (known after apply)
+      + name        = "nginx:1.27"
+      + repo_digest = (known after apply)
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+docker_image.nginx: Creating...
+docker_image.nginx: Still creating... [00m10s elapsed]
+docker_image.nginx: Still creating... [00m20s elapsed]
+docker_image.nginx: Still creating... [00m30s elapsed]
+docker_image.nginx: Still creating... [00m40s elapsed]
+docker_image.nginx: Still creating... [00m50s elapsed]
+docker_image.nginx: Still creating... [01m00s elapsed]
+docker_image.nginx: Still creating... [01m10s elapsed]
+docker_image.nginx: Still creating... [01m20s elapsed]
+docker_image.nginx: Still creating... [01m30s elapsed]
+docker_image.nginx: Creation complete after 1m36s [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+docker_container.web: Creating...
+docker_container.web: Creation complete after 1s [id=0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5]
+
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+
+$ docker ps --filter name=tf-web --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+NAMES     IMAGE          STATUS                  PORTS
+tf-web    6784fb0834aa   Up Less than a second   0.0.0.0:8081->80/tcp
+
+$ curl -si --retry 5 --retry-connrefused --retry-delay 1 http://localhost:8081 | grep -E '^HTTP|^Server|<title>'
+HTTP/1.1 200 OK
+Server: nginx/1.27.5
+<title>Welcome to nginx!</title>
+
+# 1.3 Change the external port to 8082 and read the plan
+
+$ perl -pi -e 's/external = 8081/external = 8082/' infra/quickstart/main.tf
+
+$ grep -n external infra/quickstart/main.tf
+21:    external = 8082
+
+# Expected: the container is replaced (-/+), because a port mapping cannot change on a running container
+
+$ terraform -chdir=infra/quickstart plan -no-color -input=false
+docker_image.nginx: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+docker_container.web: Refreshing state... [id=0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+-/+ destroy and then create replacement
+
+Terraform will perform the following actions:
+
+  # docker_container.web must be replaced
+-/+ resource "docker_container" "web" {
+      + bridge                                      = (known after apply)
+      ~ command                                     = [
+          - "nginx",
+          - "-g",
+          - "daemon off;",
+        ] -> (known after apply)
+      + container_logs                              = (known after apply)
+      - cpu_shares                                  = 0 -> null
+      - dns                                         = [] -> null
+      - dns_opts                                    = [] -> null
+      - dns_search                                  = [] -> null
+      ~ entrypoint                                  = [
+          - "/docker-entrypoint.sh",
+        ] -> (known after apply)
+      ~ env                                         = [] -> (known after apply)
+      + exit_code                                   = (known after apply)
+      - group_add                                   = [] -> null
+      ~ hostname                                    = "0e77022abedc" -> (known after apply)
+      ~ id                                          = "0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5" -> (known after apply)
+      ~ init                                        = false -> (known after apply)
+      ~ ipc_mode                                    = "private" -> (known after apply)
+      ~ log_driver                                  = "json-file" -> (known after apply)
+      - log_opts                                    = {} -> null
+      - max_retry_count                             = 0 -> null
+      - memory                                      = 0 -> null
+      - memory_swap                                 = 0 -> null
+        name                                        = "tf-web"
+      ~ network_data                                = [
+          - {
+              - gateway                   = "172.17.0.1"
+              - global_ipv6_prefix_length = 0
+              - ip_address                = "172.17.0.2"
+              - ip_prefix_length          = 16
+              - mac_address               = "62:0c:49:24:7e:64"
+              - network_name              = "bridge"
+                # (2 unchanged attributes hidden)
+            },
+        ] -> (known after apply)
+      - privileged                                  = false -> null
+      - publish_all_ports                           = false -> null
+      ~ runtime                                     = "runc" -> (known after apply)
+      ~ security_opts                               = [] -> (known after apply)
+      ~ shm_size                                    = 64 -> (known after apply)
+      ~ stop_signal                                 = "SIGQUIT" -> (known after apply)
+      ~ stop_timeout                                = 0 -> (known after apply)
+      - storage_opts                                = {} -> null
+      - sysctls                                     = {} -> null
+      - tmpfs                                       = {} -> null
+        # (22 unchanged attributes hidden)
+
+      ~ healthcheck (known after apply)
+
+      ~ labels (known after apply)
+
+      ~ ports {
+          ~ external = 8081 -> 8082 # forces replacement
+            # (3 unchanged attributes hidden)
+        }
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
+
+# 1.4 Apply, then inspect the state
+
+$ terraform -chdir=infra/quickstart apply -auto-approve -no-color -input=false
+docker_image.nginx: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+docker_container.web: Refreshing state... [id=0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+-/+ destroy and then create replacement
+
+Terraform will perform the following actions:
+
+  # docker_container.web must be replaced
+-/+ resource "docker_container" "web" {
+      + bridge                                      = (known after apply)
+      ~ command                                     = [
+          - "nginx",
+          - "-g",
+          - "daemon off;",
+        ] -> (known after apply)
+      + container_logs                              = (known after apply)
+      - cpu_shares                                  = 0 -> null
+      - dns                                         = [] -> null
+      - dns_opts                                    = [] -> null
+      - dns_search                                  = [] -> null
+      ~ entrypoint                                  = [
+          - "/docker-entrypoint.sh",
+        ] -> (known after apply)
+      ~ env                                         = [] -> (known after apply)
+      + exit_code                                   = (known after apply)
+      - group_add                                   = [] -> null
+      ~ hostname                                    = "0e77022abedc" -> (known after apply)
+      ~ id                                          = "0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5" -> (known after apply)
+      ~ init                                        = false -> (known after apply)
+      ~ ipc_mode                                    = "private" -> (known after apply)
+      ~ log_driver                                  = "json-file" -> (known after apply)
+      - log_opts                                    = {} -> null
+      - max_retry_count                             = 0 -> null
+      - memory                                      = 0 -> null
+      - memory_swap                                 = 0 -> null
+        name                                        = "tf-web"
+      ~ network_data                                = [
+          - {
+              - gateway                   = "172.17.0.1"
+              - global_ipv6_prefix_length = 0
+              - ip_address                = "172.17.0.2"
+              - ip_prefix_length          = 16
+              - mac_address               = "62:0c:49:24:7e:64"
+              - network_name              = "bridge"
+                # (2 unchanged attributes hidden)
+            },
+        ] -> (known after apply)
+      - privileged                                  = false -> null
+      - publish_all_ports                           = false -> null
+      ~ runtime                                     = "runc" -> (known after apply)
+      ~ security_opts                               = [] -> (known after apply)
+      ~ shm_size                                    = 64 -> (known after apply)
+      ~ stop_signal                                 = "SIGQUIT" -> (known after apply)
+      ~ stop_timeout                                = 0 -> (known after apply)
+      - storage_opts                                = {} -> null
+      - sysctls                                     = {} -> null
+      - tmpfs                                       = {} -> null
+        # (22 unchanged attributes hidden)
+
+      ~ healthcheck (known after apply)
+
+      ~ labels (known after apply)
+
+      ~ ports {
+          ~ external = 8081 -> 8082 # forces replacement
+            # (3 unchanged attributes hidden)
+        }
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+docker_container.web: Destroying... [id=0e77022abedc721a277e6000af1a1c47df19191eea21b556b67824c84d1f53d5]
+docker_container.web: Destruction complete after 0s
+docker_container.web: Creating...
+docker_container.web: Creation complete after 1s [id=abe6623c33fe29fc3ce0b1ff476d07a2ded04f2576431a6f8e201618052f9729]
+
+Apply complete! Resources: 1 added, 0 changed, 1 destroyed.
+
+$ docker ps --filter name=tf-web --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+NAMES     IMAGE          STATUS                  PORTS
+tf-web    6784fb0834aa   Up Less than a second   0.0.0.0:8082->80/tcp
+
+$ curl -si --retry 5 --retry-connrefused --retry-delay 1 http://localhost:8082 | grep -E '^HTTP|^Server|<title>'
+HTTP/1.1 200 OK
+Server: nginx/1.27.5
+<title>Welcome to nginx!</title>
+
+# Expected: nothing listens on 8081 any more (curl error 7)
+
+$ curl -sS --max-time 3 http://localhost:8081
+curl: (7) Failed to connect to localhost port 8081 after 0 ms: Couldn't connect to server
+
+$ terraform -chdir=infra/quickstart state list
+docker_container.web
+docker_image.nginx
+
+$ terraform -chdir=infra/quickstart show -no-color
+# docker_container.web:
+resource "docker_container" "web" {
+    attach                                      = false
+    bridge                                      = null
+    command                                     = [
+        "nginx",
+        "-g",
+        "daemon off;",
+    ]
+    container_read_refresh_timeout_milliseconds = 15000
+    cpu_set                                     = null
+    cpu_shares                                  = 0
+    domainname                                  = null
+    entrypoint                                  = [
+        "/docker-entrypoint.sh",
+    ]
+    env                                         = []
+    hostname                                    = "abe6623c33fe"
+    id                                          = "abe6623c33fe29fc3ce0b1ff476d07a2ded04f2576431a6f8e201618052f9729"
+    image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+    init                                        = false
+    ipc_mode                                    = "private"
+    log_driver                                  = "json-file"
+    logs                                        = false
+    max_retry_count                             = 0
+    memory                                      = 0
+    memory_reservation                          = 0
+    memory_swap                                 = 0
+    must_run                                    = true
+    name                                        = "tf-web"
+    network_data                                = [
+        {
+            gateway                   = "172.17.0.1"
+            global_ipv6_address       = null
+            global_ipv6_prefix_length = 0
+            ip_address                = "172.17.0.2"
+            ip_prefix_length          = 16
+            ipv6_gateway              = null
+            mac_address               = "9a:b7:d2:75:e9:eb"
+            network_name              = "bridge"
+        },
+    ]
+    network_mode                                = "bridge"
+    pid_mode                                    = null
+    privileged                                  = false
+    publish_all_ports                           = false
+    read_only                                   = false
+    remove_volumes                              = true
+    restart                                     = "no"
+    rm                                          = false
+    runtime                                     = "runc"
+    security_opts                               = []
+    shm_size                                    = 64
+    start                                       = true
+    stdin_open                                  = false
+    stop_signal                                 = "SIGQUIT"
+    stop_timeout                                = 0
+    tty                                         = false
+    user                                        = null
+    userns_mode                                 = null
+    wait                                        = false
+    wait_timeout                                = 60
+    working_dir                                 = null
+
+    ports {
+        external = 8082
+        internal = 80
+        ip       = "0.0.0.0"
+        protocol = "tcp"
+    }
+}
+
+# docker_image.nginx:
+resource "docker_image" "nginx" {
+    id          = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27"
+    image_id    = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+    name        = "nginx:1.27"
+    repo_digest = "nginx@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+}
+
+# 1.5 Delete the container outside Terraform, then plan
+
+$ docker rm -f tf-web
+tf-web
+
+$ docker ps -a --filter name=tf-web --format '{{.Names}}' | grep . || echo 'no container named tf-web'
+no container named tf-web
+
+# Expected: Terraform sees the container is gone and plans to create it again
+
+$ terraform -chdir=infra/quickstart plan -no-color -input=false
+docker_image.nginx: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+docker_container.web: Refreshing state... [id=abe6623c33fe29fc3ce0b1ff476d07a2ded04f2576431a6f8e201618052f9729]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "tf-web"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8082
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
+
+# -detailed-exitcode: 0 = no changes, 2 = changes pending (what a drift check in CI looks for)
+
+$ terraform -chdir=infra/quickstart plan -detailed-exitcode -no-color -input=false >/dev/null; echo "exit code: $?"
+exit code: 2
+
+# Back to the desired state
+
+$ terraform -chdir=infra/quickstart apply -auto-approve -no-color -input=false
+docker_image.nginx: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+docker_container.web: Refreshing state... [id=abe6623c33fe29fc3ce0b1ff476d07a2ded04f2576431a6f8e201618052f9729]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "tf-web"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8082
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+docker_container.web: Creating...
+docker_container.web: Creation complete after 0s [id=f02e23afadf55618b63647ab558d3c6643f8d534fd5bc8a5925c13508025139c]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+$ curl -si --retry 5 --retry-connrefused --retry-delay 1 http://localhost:8082 | grep -E '^HTTP|^Server|<title>'
+HTTP/1.1 200 OK
+Server: nginx/1.27.5
+<title>Welcome to nginx!</title>
+
+$ terraform -chdir=infra/quickstart plan -detailed-exitcode -no-color -input=false >/dev/null; echo "exit code: $?"
+exit code: 0
+
+# Q2: what the local state holds, and why it stays out of Git
+
+$ ls -a infra/quickstart
+.
+..
+.terraform
+.terraform.lock.hcl
+main.tf
+terraform.tfstate
+terraform.tfstate.backup
+
+$ grep -E '"(serial|lineage|hostname|ip_address|gateway|mac_address|repo_digest)"' infra/quickstart/terraform.tfstate
+  "serial": 25,
+  "lineage": "01032014-9545-4cc1-d274-8965622087d8",
+            "hostname": "f02e23afadf5",
+                "gateway": "172.17.0.1",
+                "ip_address": "172.17.0.2",
+                "mac_address": "06:04:af:1b:57:25",
+            "repo_digest": "nginx@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d",
+
+$ git check-ignore -v infra/quickstart/terraform.tfstate infra/quickstart/terraform.tfstate.backup infra/quickstart/.terraform
+.gitignore:13:*.tfstate	infra/quickstart/terraform.tfstate
+.gitignore:14:*.tfstate.*	infra/quickstart/terraform.tfstate.backup
+.gitignore:15:.terraform/	infra/quickstart/.terraform

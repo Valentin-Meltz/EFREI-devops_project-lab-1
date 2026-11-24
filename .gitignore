@@ -8,3 +8,8 @@ npm-debug.log*
 # the relevant entries are kept in evidence/07-api-audit/)
 rendered/
 evidence/audit/
+
+# Lab 3: Terraform local state and provider cache (never commit state)
+*.tfstate
+*.tfstate.*
+.terraform/

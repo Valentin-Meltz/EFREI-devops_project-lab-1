@@ -30,3 +30,13 @@ Real outputs captured on 2026-11-18 on the kind cluster `devops-lab` (Kubernetes
 - The `Forbidden` errors in part 6 are the expected RBAC denials for the viewer account.
 - Bonus: the raw API server log `evidence/audit/audit.log` is git-ignored (every request of the cluster, with users, source IPs and certificate fingerprints); only the relevant entries are kept in part 7. The first run of script 07 wrote its own output into that raw log instead of `07-api-audit/` (a variable name clash, fixed); those lines were removed from the raw log and the script was run again. Its audit entries are still listed, which is what an audit log is for.
 - The fake API key `changeme` appears on purpose. The GHCR pull token never appears in any output.
+
+# Lab 3: Terraform
+
+Real outputs captured on 2026-11-24 with Terraform v1.17.2 and Docker 28.4.0 (Docker Desktop, arm64). Same rule as above: each file is written by the script of the same number in `scripts/evidence/` and was not edited by hand. Applies use `-auto-approve` so the scripts are not interactive.
+
+| Part | File | What it shows |
+| --- | --- | --- |
+| 1 | [08-terraform-quickstart/quickstart.txt](08-terraform-quickstart/quickstart.txt) | `init`/`fmt`/`validate`/`plan`, apply and `curl :8081` → `200 OK`, port 8081 → 8082 plan (**`-/+` must be replaced, `# forces replacement`**), `show` and `state list`, **container deleted with `docker rm -f` → plan proposes to create it again** (`-detailed-exitcode` 2), re-apply → exit code 0, what the state holds and `git check-ignore` on it (Q2) |
+
+- The script starts by destroying any previous run and setting `external` back to 8081, then changes it to 8082 itself (1.3). It leaves `tf-web` running on 8082 and `main.tf` at 8082, the end state of part 1.
