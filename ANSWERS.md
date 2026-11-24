@@ -117,3 +117,30 @@ Mitigations:
 - `terraform destroy` for PR 42 removes the namespace and everything in it: `namespaces "pr-42" not found`, `No resources found in pr-42 namespace`, and its state holds 0 resources. PR 43 keeps running and answering.
 - The namespaces carry `owner=Valentin-Meltz` and `expires=2026-11-27` (creation date + 3 days, unchanged by later plans). The cleanup query finds no expired preview today; with a simulated date of 2026-12-31 it lists `pr-43 owner=Valentin-Meltz expired=2026-11-27`.
 - Each preview requests 50m CPU and 64Mi of memory, with 1 replica.
+
+## Q7 — Why run `plan` on a Pull Request but `apply` only after merge?
+`plan` is read-only: it changes nothing, so it can run on every Pull Request, including unreviewed code. It shows reviewers the real impact of the change on the infrastructure, next to the code diff, and catches errors before anything is touched. `apply` changes real infrastructure, so it must only run on code that has been reviewed, approved and merged into the branch that describes production. Applying from Pull Requests instead would mean:
+- **Unreviewed changes in production**, and changes left applied by a Pull Request that is later closed without merging.
+- **Several open Pull Requests applying in turn.** Each one overwrites the others, the infrastructure flips back and forth, and it no longer matches `main` or any single branch.
+- **Write credentials in Pull Request jobs**, which may run code from a fork or a compromised dependency.
+- **A stale plan.** A plan computed on a branch can be outdated by the time of the merge (other merges, drift). After the merge, plan again from `main`, ideally apply exactly that saved plan, and gate the job with a protected environment that requires approval.
+
+**Observed** ([12](evidence/12-terraform-ci/ci.txt)):
+- The workflow runs only on `pull_request` (paths `infra/**`), with a read-only token (`permissions: contents: read`). Its only Terraform commands are `fmt`, `init`, `validate`, `plan` and `show`, and there is no `terraform apply` in it.
+- Each run uploads the text plan of dev and staging as artifacts (`plan-dev`, `plan-staging`, kept 7 days). The CI plans against an empty state (`Plan: 2 to add`), because the real dev state is in a folder on the lab machine.
+- The misconfigured commit `d1f5323` was validated, planned and scanned. It failed on Checkov, was never applied, and was reverted before any merge.
+- On this repository, `main` requires one approving review but only `build-test` as a required check. To make a red Checkov block the merge by itself, the Terraform jobs should become required checks too. That also means running the workflow on every Pull Request: a path-filtered workflow produces no check at all on a Pull Request that does not touch `infra/**`, and a required check would then wait forever.
+
+## Q8 — Why should a CI pipeline use short-lived credentials (OIDC) rather than long-lived access keys?
+A long-lived access key stored as a CI secret stays valid for months, until someone rotates it by hand. Any leak (a log line, a compromised action or dependency, a malicious Pull Request, a copied secret) gives an attacker working credentials, usable from anywhere until the leak is noticed. Such a key is often shared by several workflows and rarely rotated, so its blast radius is large and its use is hard to attribute.
+
+With OIDC, the job asks GitHub for a signed identity token (`permissions: id-token: write`), and the cloud provider exchanges it for temporary credentials, for example AWS `AssumeRoleWithWebIdentity`, valid for about an hour:
+- **Nothing to store, nothing to rotate.** A stolen token expires on its own, quickly.
+- **Scoped trust.** The cloud trust policy checks the token's claims (repository, branch, environment, workflow). Pull Request jobs can get a read-only role for `plan`, and only the `main` deployment job, behind a protected environment, can get the role that runs `apply`.
+- **Attribution.** Every use is logged with the identity of the exact repository, ref and run that requested it.
+
+**Observed** ([12](evidence/12-terraform-ci/ci.txt)):
+- The Terraform workflow needs no credential at all: it has a read-only `GITHUB_TOKEN` and references no secret.
+- The image publishing job of `ci.yml` pushes to GHCR with `secrets.GITHUB_TOKEN`, a token GitHub creates for each job and that expires when the job ends: the short-lived model.
+- The GHCR pull token of parts 4 and Lab 2 is the opposite: a classic personal access token, long-lived. It is kept outside the repository, reaches Terraform only through an ephemeral variable, and never lands in a state.
+- In March 2026, hijacked `aquasecurity/trivy-action` tags ran credential-stealing code inside CI pipelines for about 12 hours. Long-lived keys exposed to those jobs stay valid until rotated, while job tokens and OIDC credentials expire on their own. That incident is also why this workflow pins every action to a commit SHA.
