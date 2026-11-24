@@ -71,6 +71,9 @@ resource "kubernetes_secret" "ghcr_pull" {
 }
 
 resource "kubernetes_deployment" "app" {
+  # Checkov cannot see through var.image; both points are enforced elsewhere.
+  #checkov:skip=CKV_K8S_14:var.image validation rejects :latest and untagged images
+  #checkov:skip=CKV_K8S_43:tags are full commit SHAs, never reused (docs/image-registry.md)
   metadata {
     name      = "myapp"
     namespace = kubernetes_namespace.preview.metadata[0].name
@@ -105,9 +108,11 @@ resource "kubernetes_deployment" "app" {
         }
 
         container {
-          name              = "myapp"
-          image             = var.image
-          image_pull_policy = "IfNotPresent"
+          name  = "myapp"
+          image = var.image
+          # Always: every new pod authenticates to the registry with its own
+          # pull secret, even when the image is already cached on the node.
+          image_pull_policy = "Always"
 
           port {
             name           = "http"

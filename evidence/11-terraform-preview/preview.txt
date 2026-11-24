@@ -1,5 +1,5 @@
 ### 11 - Ephemeral preview environments per Pull Request
-### 2026-11-24T10:14:01Z | context: kind-devops-lab
+### 2026-11-24T10:33:52Z | context: kind-devops-lab
 
 # Reset before this run: previews pr-42 and pr-43 of a previous run destroyed
 
@@ -80,6 +80,9 @@ resource "kubernetes_secret" "ghcr_pull" {
 }
 
 resource "kubernetes_deployment" "app" {
+  # Checkov cannot see through var.image; both points are enforced elsewhere.
+  #checkov:skip=CKV_K8S_14:var.image validation rejects :latest and untagged images
+  #checkov:skip=CKV_K8S_43:tags are full commit SHAs, never reused (docs/image-registry.md)
   metadata {
     name      = "myapp"
     namespace = kubernetes_namespace.preview.metadata[0].name
@@ -114,9 +117,11 @@ resource "kubernetes_deployment" "app" {
         }
 
         container {
-          name              = "myapp"
-          image             = var.image
-          image_pull_policy = "IfNotPresent"
+          name  = "myapp"
+          image = var.image
+          # Always: every new pod authenticates to the registry with its own
+          # pull secret, even when the image is already cached on the node.
+          image_pull_policy = "Always"
 
           port {
             name           = "http"
@@ -370,7 +375,7 @@ Terraform will perform the following actions:
 
                   + container {
                       + image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22"
-                      + image_pull_policy          = "IfNotPresent"
+                      + image_pull_policy          = "Always"
                       + name                       = "myapp"
                       + stdin                      = false
                       + stdin_once                 = false
@@ -562,7 +567,7 @@ kubernetes_service.app: Creating...
 kubernetes_secret.ghcr_pull: Creation complete after 0s [id=pr-42/ghcr-pull]
 kubernetes_service.app: Creation complete after 0s [id=pr-42/myapp]
 kubernetes_deployment.app: Creating...
-kubernetes_deployment.app: Creation complete after 7s [id=pr-42/myapp]
+kubernetes_deployment.app: Creation complete after 8s [id=pr-42/myapp]
 
 Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
 
@@ -580,25 +585,25 @@ exit code: 0
 
 $ kubectl --context kind-devops-lab get all -n pr-42
 NAME                         READY   STATUS    RESTARTS   AGE
-pod/myapp-659b4f7885-l2n5z   1/1     Running   0          8s
+pod/myapp-7946d489dc-wtxbj   1/1     Running   0          8s
 
 NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
-service/myapp   ClusterIP   10.96.163.102   <none>        80/TCP    8s
+service/myapp   ClusterIP   10.96.172.114   <none>        80/TCP    8s
 
 NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
 deployment.apps/myapp   1/1     1            1           8s
 
 NAME                               DESIRED   CURRENT   READY   AGE
-replicaset.apps/myapp-659b4f7885   1         1         1       8s
+replicaset.apps/myapp-7946d489dc   1         1         1       8s
 
 $ kubectl --context kind-devops-lab get secret ghcr-pull -n pr-42
 NAME        TYPE                             DATA   AGE
-ghcr-pull   kubernetes.io/dockerconfigjson   1      9s
+ghcr-pull   kubernetes.io/dockerconfigjson   1      8s
 
 # port-forward svc/myapp in pr-42 to localhost:18042 (background)
 
 $ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18042/; echo
-{"service":"myapp","version":"1.1.0","commit":"982483e48711ca36531464c164ad73718640ee22","environment":"pr-42","apiKeyConfigured":false,"pod":"myapp-659b4f7885-l2n5z"}
+{"service":"myapp","version":"1.1.0","commit":"982483e48711ca36531464c164ad73718640ee22","environment":"pr-42","apiKeyConfigured":false,"pod":"myapp-7946d489dc-wtxbj"}
 
 $ curl -si http://localhost:18042/health | sed -n '1p;$p'; echo
 HTTP/1.1 200 OK
@@ -708,7 +713,7 @@ Terraform will perform the following actions:
 
                   + container {
                       + image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f57ad68f209a683faeb358a1389c4df"
-                      + image_pull_policy          = "IfNotPresent"
+                      + image_pull_policy          = "Always"
                       + name                       = "myapp"
                       + stdin                      = false
                       + stdin_once                 = false
@@ -900,7 +905,8 @@ kubernetes_service.app: Creating...
 kubernetes_secret.ghcr_pull: Creation complete after 0s [id=pr-43/ghcr-pull]
 kubernetes_service.app: Creation complete after 0s [id=pr-43/myapp]
 kubernetes_deployment.app: Creating...
-kubernetes_deployment.app: Creation complete after 8s [id=pr-43/myapp]
+kubernetes_deployment.app: Still creating... [00m10s elapsed]
+kubernetes_deployment.app: Creation complete after 16s [id=pr-43/myapp]
 
 Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
 
@@ -912,22 +918,22 @@ port_forward = "kubectl --context kind-devops-lab port-forward -n pr-43 svc/myap
 service_url = "http://myapp.pr-43.svc.cluster.local"
 
 $ kubectl --context kind-devops-lab get all -n pr-43
-NAME                        READY   STATUS    RESTARTS   AGE
-pod/myapp-7f8cd58bd-p5t2z   1/1     Running   0          8s
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-69dcfc4cbb-xpbxc   1/1     Running   0          15s
 
 NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
-service/myapp   ClusterIP   10.96.44.203   <none>        80/TCP    8s
+service/myapp   ClusterIP   10.96.105.63   <none>        80/TCP    15s
 
 NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/myapp   1/1     1            1           8s
+deployment.apps/myapp   1/1     1            1           15s
 
-NAME                              DESIRED   CURRENT   READY   AGE
-replicaset.apps/myapp-7f8cd58bd   1         1         1       8s
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-69dcfc4cbb   1         1         1       15s
 
 # port-forward svc/myapp in pr-43 to localhost:18043 (background)
 
 $ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18043/; echo
-{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-7f8cd58bd-p5t2z"}
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-69dcfc4cbb-xpbxc"}
 
 $ curl -si http://localhost:18043/health | sed -n '1p;$p'; echo
 HTTP/1.1 200 OK
@@ -937,8 +943,8 @@ OK
 
 $ kubectl --context kind-devops-lab get namespaces -l purpose=preview -L pr,owner,expires
 NAME    STATUS   AGE   PR    OWNER            EXPIRES
-pr-42   Active   20s   42    Valentin-Meltz   2026-11-27
-pr-43   Active   9s    43    Valentin-Meltz   2026-11-27
+pr-42   Active   27s   42    Valentin-Meltz   2026-11-27
+pr-43   Active   17s   43    Valentin-Meltz   2026-11-27
 
 $ kubectl --context kind-devops-lab get deployments -A -l app=myapp -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
 NAMESPACE   NAME    IMAGE
@@ -950,12 +956,12 @@ staging     myapp   ghcr.io/valentin-meltz/efrei-devops_project-lab-1:ba33ff148f
 
 $ ls -lan infra/preview/state
 total 96
-drwxr-xr-x@ 6 501  20    192 Nov 24 11:14 .
-drwxr-xr-x@ 8 501  20    256 Nov 24 11:12 ..
--rw-r--r--@ 1 501  20  17737 Nov 24 11:14 pr-42.tfstate
--rw-r--r--@ 1 501  20    685 Nov 24 11:14 pr-42.tfstate.backup
--rw-r--r--@ 1 501  20  17734 Nov 24 11:14 pr-43.tfstate
--rw-r--r--@ 1 501  20    684 Nov 24 11:14 pr-43.tfstate.backup
+drwxr-xr-x@ 6 501  20    192 Nov 24 11:34 .
+drwxr-xr-x@ 8 501  20    256 Nov 24 11:33 ..
+-rw-r--r--@ 1 501  20  17731 Nov 24 11:34 pr-42.tfstate
+-rw-r--r--@ 1 501  20    685 Nov 24 11:33 pr-42.tfstate.backup
+-rw-r--r--@ 1 501  20  17729 Nov 24 11:34 pr-43.tfstate
+-rw-r--r--@ 1 501  20    685 Nov 24 11:34 pr-43.tfstate.backup
 
 $ terraform -chdir=infra/preview state list
 kubernetes_deployment.app
@@ -1037,8 +1043,8 @@ Terraform will perform the following actions:
             } -> null
           - name             = "myapp" -> null
           - namespace        = "pr-42" -> null
-          - resource_version = "58447" -> null
-          - uid              = "6f366261-9b8a-4b2a-8d69-b4c8c874876e" -> null
+          - resource_version = "60229" -> null
+          - uid              = "c4f32f28-f378-4162-a7f1-e5dd5e0e5454" -> null
             # (1 unchanged attribute hidden)
         }
 
@@ -1093,7 +1099,7 @@ Terraform will perform the following actions:
                       - args                       = [] -> null
                       - command                    = [] -> null
                       - image                      = "ghcr.io/valentin-meltz/efrei-devops_project-lab-1:982483e48711ca36531464c164ad73718640ee22" -> null
-                      - image_pull_policy          = "IfNotPresent" -> null
+                      - image_pull_policy          = "Always" -> null
                       - name                       = "myapp" -> null
                       - stdin                      = false -> null
                       - stdin_once                 = false -> null
@@ -1212,8 +1218,8 @@ Terraform will perform the following actions:
               - "purpose" = "preview"
             } -> null
           - name             = "pr-42" -> null
-          - resource_version = "58404" -> null
-          - uid              = "a290c298-25aa-4e1c-a7b0-a7d3ff694a1f" -> null
+          - resource_version = "60187" -> null
+          - uid              = "c4ec370d-462c-4346-b595-3b45833e9f1b" -> null
             # (1 unchanged attribute hidden)
         }
     }
@@ -1234,8 +1240,8 @@ Terraform will perform the following actions:
           - labels           = {} -> null
           - name             = "ghcr-pull" -> null
           - namespace        = "pr-42" -> null
-          - resource_version = "58407" -> null
-          - uid              = "df6700dd-1dd2-4c9a-a491-e27c170950d3" -> null
+          - resource_version = "60190" -> null
+          - uid              = "4275365b-019b-4a50-b567-7738b412a35a" -> null
             # (1 unchanged attribute hidden)
         }
     }
@@ -1262,16 +1268,16 @@ Terraform will perform the following actions:
             } -> null
           - name             = "myapp" -> null
           - namespace        = "pr-42" -> null
-          - resource_version = "58409" -> null
-          - uid              = "01133a84-93d6-4d12-9a71-5d7b7bc338df" -> null
+          - resource_version = "60192" -> null
+          - uid              = "62183051-6465-487f-a2d5-228b1f4a2eba" -> null
             # (1 unchanged attribute hidden)
         }
 
       - spec {
           - allocate_load_balancer_node_ports = true -> null
-          - cluster_ip                        = "10.96.163.102" -> null
+          - cluster_ip                        = "10.96.172.114" -> null
           - cluster_ips                       = [
-              - "10.96.163.102",
+              - "10.96.172.114",
             ] -> null
           - external_ips                      = [] -> null
           - health_check_node_port            = 0 -> null
@@ -1314,7 +1320,7 @@ kubernetes_service.app: Destruction complete after 0s
 kubernetes_secret.ghcr_pull: Destroying... [id=pr-42/ghcr-pull]
 kubernetes_secret.ghcr_pull: Destruction complete after 0s
 kubernetes_namespace.preview: Destroying... [id=pr-42]
-kubernetes_namespace.preview: Destruction complete after 7s
+kubernetes_namespace.preview: Destruction complete after 6s
 
 Destroy complete! Resources: 4 destroyed.
 
@@ -1330,22 +1336,22 @@ $ jq '.resources | length' infra/preview/state/pr-42.tfstate
 # PR 43 is untouched
 
 $ kubectl --context kind-devops-lab get all -n pr-43
-NAME                        READY   STATUS    RESTARTS   AGE
-pod/myapp-7f8cd58bd-p5t2z   1/1     Running   0          16s
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/myapp-69dcfc4cbb-xpbxc   1/1     Running   0          24s
 
 NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
-service/myapp   ClusterIP   10.96.44.203   <none>        80/TCP    16s
+service/myapp   ClusterIP   10.96.105.63   <none>        80/TCP    24s
 
 NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/myapp   1/1     1            1           16s
+deployment.apps/myapp   1/1     1            1           24s
 
-NAME                              DESIRED   CURRENT   READY   AGE
-replicaset.apps/myapp-7f8cd58bd   1         1         1       16s
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/myapp-69dcfc4cbb   1         1         1       24s
 
 # port-forward svc/myapp in pr-43 to localhost:18043 (background)
 
 $ curl -s --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18043/; echo
-{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-7f8cd58bd-p5t2z"}
+{"service":"myapp","version":"1.0.0","commit":"ba33ff148f57ad68f209a683faeb358a1389c4df","environment":"pr-43","apiKeyConfigured":false,"pod":"myapp-69dcfc4cbb-xpbxc"}
 
 $ curl -si http://localhost:18043/health | sed -n '1p;$p'; echo
 HTTP/1.1 200 OK
@@ -1353,7 +1359,7 @@ OK
 
 $ kubectl --context kind-devops-lab get namespaces -l purpose=preview -L pr,owner,expires
 NAME    STATUS   AGE   PR    OWNER            EXPIRES
-pr-43   Active   18s   43    Valentin-Meltz   2026-11-27
+pr-43   Active   25s   43    Valentin-Meltz   2026-11-27
 
 # 4.5 / Q6: the labels let a scheduled cleanup job find expired previews (today, then a simulated later date)
 

@@ -1,0 +1,119 @@
+name: terraform
+
+# Lab 3, part 5: checks every Pull Request that changes the Terraform code.
+# It never runs apply (5.4): changes are applied only after merge, from the
+# reviewed main branch.
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".checkov.yaml"
+      - ".github/workflows/terraform.yml"
+
+# Read-only token: this workflow needs no write access and no cloud credentials.
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TERRAFORM_VERSION: "1.17.2"
+
+# Actions are pinned to full commit SHAs: a tag can be moved to malicious code
+# (as happened to 76 tags of aquasecurity/trivy-action in March 2026).
+jobs:
+  validate:
+    name: fmt + validate (${{ matrix.root }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        root:
+          - infra/quickstart
+          - infra/modules/webapp
+          - infra/envs/dev
+          - infra/envs/staging
+          - infra/preview
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      # 5.1
+      - name: terraform fmt -check
+        run: terraform -chdir=${{ matrix.root }} fmt -check -diff
+      # No backend: validation needs neither a state nor credentials. The
+      # committed lock file must already cover the runner (-lockfile=readonly).
+      - name: terraform init
+        run: terraform -chdir=${{ matrix.root }} init -backend=false -lockfile=readonly
+      - name: terraform validate
+        run: terraform -chdir=${{ matrix.root }} validate
+
+  plan:
+    name: plan (${{ matrix.env }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, staging]
+    env:
+      ROOT: infra/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      # The real dev state lives in a shared folder on the lab machine, which a
+      # GitHub runner cannot reach, so CI plans against an empty state: the plan
+      # shows everything the configuration declares. With a real remote backend,
+      # the runner would read the state with short-lived OIDC credentials.
+      - name: terraform init
+        run: terraform -chdir="$ROOT" init -lockfile=readonly
+      # 5.2: the plan is saved, rendered as text and uploaded. The binary plan
+      # file is not uploaded: like the state, it can hold sensitive values.
+      - name: terraform plan
+        run: |
+          terraform -chdir="$ROOT" plan -var-file=${{ matrix.env }}.tfvars -lock-timeout=60s -no-color -out=tfplan
+          terraform -chdir="$ROOT" show -no-color tfplan > "plan-${{ matrix.env }}.txt"
+      - name: Plan summary
+        run: |
+          {
+            echo "### terraform plan (${{ matrix.env }})"
+            echo '```'
+            grep -E '^(Plan:|No changes)' "plan-${{ matrix.env }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-${{ matrix.env }}
+          path: plan-${{ matrix.env }}.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  # 5.3: static security scan. The policy (which checks fail the build) is in
+  # .checkov.yaml at the repository root.
+  security:
+    name: checkov (fails on high severity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: bridgecrewio/checkov-action@8e8cda997b70e26df83e7a0564476f89eb9ed757 # v12.3144.0 (checkov 3.4.8)
+        with:
+          config_file: .checkov.yaml
+          directory: infra
