@@ -33,12 +33,15 @@ Real outputs captured on 2026-11-18 on the kind cluster `devops-lab` (Kubernetes
 
 # Lab 3: Terraform
 
-Real outputs captured on 2026-11-24 with Terraform v1.17.2 and Docker 28.4.0 (Docker Desktop, arm64). Same rule as above: each file is written by the script of the same number in `scripts/evidence/` and was not edited by hand. Applies use `-auto-approve` so the scripts are not interactive.
+Real outputs captured on 2026-11-24 with Terraform v1.17.2 and Docker 28.4.0 (Docker Desktop, arm64). Same rule as above: each file is written by the script of the same number in `scripts/evidence/` and was not edited by hand. Applies use `-auto-approve` and the state migration uses `-force-copy`, so the scripts are not interactive.
 
 | Part | File | What it shows |
 | --- | --- | --- |
 | 1 | [08-terraform-quickstart/quickstart.txt](08-terraform-quickstart/quickstart.txt) | `init`/`fmt`/`validate`/`plan`, apply and `curl :8081` → `200 OK`, port 8081 → 8082 plan (**`-/+` must be replaced, `# forces replacement`**), `show` and `state list`, **container deleted with `docker rm -f` → plan proposes to create it again** (`-detailed-exitcode` 2), re-apply → exit code 0, what the state holds and `git check-ignore` on it (Q2) |
 | 2 | [09-terraform-modules/modules.txt](09-terraform-modules/modules.txt) | `webapp` module code, quickstart destroyed, **dev and staging applied separately** (`-chdir` + `-var-file`), **`webapp-dev` :8083 and `webapp-staging` :8084 side by side**, both `200 OK`, outputs, one state per folder with the same addresses, dev plan unchanged after the staging apply (exit code 0), variable validation errors (Q3) |
+| 3 | [10-terraform-state/state.txt](10-terraform-state/state.txt) | `.gitignore` checked with `git check-ignore` (state, plans, `.terraform/`, `*.secret.tfvars` and auto-loaded tfvars ignored; `dev.tfvars` and lock files kept), committed lock files, **dev state migrated to the shared folder** (`init -migrate-state`), `state list`/`state show`, **drift: `webapp-dev` recreated by hand on 8085 → `plan -refresh-only` and `plan` report `has been deleted`** (exit code 2), apply blocked by the name conflict, back to 8083 (exit code 0), **state lock: second plan gets `Error acquiring the state lock`** (Q4), state file permissions and content (Q5) |
 
 - Script 08 starts by destroying any previous run and setting `external` back to 8081, then changes it to 8082 itself (1.3), and leaves `main.tf` at 8082, the end state of part 1. Script 09 then destroys `tf-web`: the module replaces it.
 - The module sets `keep_locally = true` on its image: dev and staging use the same `nginx:1.27` on the same Docker host, and destroying one environment must not try to delete an image the other still runs.
+- Script 10 starts by moving the dev state back into `infra/envs/dev` and emptying the shared folder, so that 3.3 is always a real migration. It leaves the dev state in `/Users/Shared/terraform-state/efrei-devops-lab/dev/` and `webapp-dev` on 8083. The only expected errors are the name conflict of the apply in 3.5 and `Error acquiring the state lock` in the locking demo.
+- In script 10 the lock's `Who` field (local user and machine name) is masked with `sed`, and `ls -n` prints numeric owner IDs instead of the local user name. Both commands appear in the log.

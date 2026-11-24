@@ -1,4 +1,9 @@
 terraform {
+  # Partial backend configuration: the state location is given at init time,
+  #   terraform init -backend-config=shared.backend.hcl
+  # (shared folder, see part 3.3). Without it, the state stays in this folder.
+  backend "local" {}
+
   required_providers {
     docker = {
       source  = "kreuzwerker/docker"

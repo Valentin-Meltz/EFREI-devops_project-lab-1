@@ -1,0 +1,628 @@
+### 10 - Terraform state: backend, drift, locking
+### 2026-11-24T09:59:29Z | Terraform v1.17.2, docker 28.4.0
+
+# Reset before this run: dev state back in infra/envs/dev, webapp-dev on 8083, shared folder empty
+
+# 3.1 .gitignore: state, plans, provider cache and secret or auto-loaded tfvars are ignored
+
+$ sed -n '/# Lab 3/,$p' .gitignore
+# Lab 3: Terraform
+# State (and its backup and lock files), saved plans and the provider cache are
+# never committed: state and plans hold every attribute in clear text.
+# .terraform.lock.hcl is committed on purpose (provider versions and checksums).
+*.tfstate*
+*.tfplan
+tfplan
+.terraform/
+crash.log
+crash.*.log
+# Variable files holding secrets are named *.secret.tfvars, and the files
+# Terraform loads automatically (terraform.tfvars, *.auto.tfvars) are local
+# overrides: none of them is committed. Plain per-environment files such as
+# dev.tfvars and staging.tfvars hold no secret and are committed.
+*.secret.tfvars
+*.secret.tfvars.json
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+
+$ git check-ignore -v --non-matching infra/envs/dev/terraform.tfstate infra/envs/dev/terraform.tfstate.backup infra/envs/dev/.terraform.tfstate.lock.info infra/envs/dev/.terraform infra/envs/dev/tfplan infra/envs/dev/db.secret.tfvars infra/envs/dev/terraform.tfvars infra/envs/dev/local.auto.tfvars infra/envs/dev/dev.tfvars infra/envs/dev/.terraform.lock.hcl infra/envs/dev/shared.backend.hcl
+.gitignore:16:*.tfstate*	infra/envs/dev/terraform.tfstate
+.gitignore:16:*.tfstate*	infra/envs/dev/terraform.tfstate.backup
+.gitignore:16:*.tfstate*	infra/envs/dev/.terraform.tfstate.lock.info
+.gitignore:19:.terraform/	infra/envs/dev/.terraform
+.gitignore:18:tfplan	infra/envs/dev/tfplan
+.gitignore:26:*.secret.tfvars	infra/envs/dev/db.secret.tfvars
+.gitignore:28:terraform.tfvars	infra/envs/dev/terraform.tfvars
+.gitignore:30:*.auto.tfvars	infra/envs/dev/local.auto.tfvars
+::	infra/envs/dev/dev.tfvars
+::	infra/envs/dev/.terraform.lock.hcl
+::	infra/envs/dev/shared.backend.hcl
+
+# '::' = not ignored: dev.tfvars, the lock file and the backend config are committed
+
+# 3.2 The dependency lock files are committed
+
+$ git ls-files '*.terraform.lock.hcl'
+infra/envs/dev/.terraform.lock.hcl
+infra/envs/staging/.terraform.lock.hcl
+infra/quickstart/.terraform.lock.hcl
+
+$ cat infra/envs/dev/.terraform.lock.hcl
+# This file is maintained automatically by "terraform init".
+# Manual edits may be lost in future updates.
+
+provider "registry.terraform.io/kreuzwerker/docker" {
+  version     = "3.9.0"
+  constraints = "~> 3.0"
+  hashes = [
+    "h1:p65AjYSOmmHPjKkIYlEnxSMyrprTHKf1qBzKhCnCtG8=",
+    "zh:0ead8281830e9b9496651282235d9a139ba1b1b6ff79e395eb8c78658dc446b9",
+    "zh:0f17d37d8d3872df3fb75c68b5272e0c981343f53b506a9675b4405191edd3ef",
+    "zh:11d50b37323874427c6d2a08b737d3c7707c8301fdd236c94485cf2828d0b14b",
+    "zh:32f6f9b847446054e2db3d72886ef2f1d1aa51a6d0dac42340b07dad18e3f28f",
+    "zh:5ea5c67668b5dcbda560dc6104b788a9bfc974d52f02f7886889b77cc0e5d248",
+    "zh:5fb19a0b07edc344cd3ddeeb9cfb3d183089deb7a6a94a7b22a583aa1712596b",
+    "zh:602a7ece444e2a142ec5245abb98e7a1a990a68afae2df63b6c85ec084f0c5d7",
+    "zh:693dce278524ad8a6d6c9dd7a01bcd63bb85189639198f8d0b044ab0e5099401",
+    "zh:72e9911568103576c6a78fa38841cfd45eeb88ad22a2c649eb140a377a5b3c26",
+    "zh:956b62b6857cbb467b50158601f01b1203daa34cbd447dcc7f044c327e878b68",
+    "zh:9d372bac0d4479868b34485fb4966ba7bb525938f818b6a625f4977004ea83f9",
+    "zh:e06658a51427f9f53dbdb06263406fc1bc56d1a4fb5e7eb660d7cdfc22f596bd",
+    "zh:eee38dadf672b946419af25160eae7c03fc2afbb14f39f2f1d2a7404d647e2f7",
+  ]
+}
+
+# 3.3 Before: the dev state is a local file next to the code
+
+$ sed -n '1,9p' infra/envs/dev/main.tf
+terraform {
+  # Partial backend configuration: the state location is given at init time,
+  #   terraform init -backend-config=shared.backend.hcl
+  # (shared folder, see part 3.3). Without it, the state stays in this folder.
+  backend "local" {}
+
+  required_providers {
+    docker = {
+      source  = "kreuzwerker/docker"
+
+$ cat infra/envs/dev/shared.backend.hcl
+# "Remote-like" backend for dev: the state lives in a folder shared by every
+# user of this Mac, outside the repository, like a team bucket or network drive.
+# The local backend locks the state file while an operation runs.
+#   terraform -chdir=infra/envs/dev init -migrate-state -backend-config=shared.backend.hcl
+path = "/Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate"
+
+$ ls -lan infra/envs/dev
+total 64
+drwxr-xr-x@ 9 501  20   288 Nov 24 10:59 .
+drwxr-xr-x@ 4 501  20   128 Nov 24 10:46 ..
+drwxr-xr-x@ 5 501  20   160 Nov 24 10:59 .terraform
+-rw-r--r--@ 1 501  20  1260 Nov 24 10:47 .terraform.lock.hcl
+-rw-r--r--@ 1 501  20    72 Nov 24 10:46 dev.tfvars
+-rw-r--r--@ 1 501  20   776 Nov 24 10:56 main.tf
+-rw-r--r--@ 1 501  20   393 Nov 24 10:56 shared.backend.hcl
+-rw-r--r--@ 1 501  20  5581 Nov 24 10:59 terraform.tfstate
+-rw-r--r--@ 1 501  20  5581 Nov 24 10:59 terraform.tfstate.backup
+
+$ ls -lan /Users/Shared/terraform-state/efrei-devops-lab/dev
+ls: /Users/Shared/terraform-state/efrei-devops-lab/dev: No such file or directory
+
+# Migrate. Run interactively, init asks 'Do you want to copy existing state to the new backend?'; -force-copy answers yes
+
+$ terraform -chdir=infra/envs/dev init -migrate-state -force-copy -backend-config=shared.backend.hcl -no-color -input=false
+Initializing the backend...
+Backend configuration changed!
+
+Terraform has detected that the configuration specified for the backend
+has changed. Terraform will now check for existing state in the backends.
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing modules...
+
+Initializing provider plugins...
+- Reusing version 3.9.0 of kreuzwerker/docker from the dependency lock file
+- Using previously-installed kreuzwerker/docker v3.9.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+$ ls -lan /Users/Shared/terraform-state/efrei-devops-lab/dev
+total 16
+drwxr-xr-x@ 3 501  0    96 Nov 24 10:59 .
+drwxr-xr-x@ 3 501  0    96 Nov 24 10:59 ..
+-rw-r--r--@ 1 501  0  5581 Nov 24 10:59 terraform.tfstate
+
+$ jq '.backend | {type, path: .config.path}' infra/envs/dev/.terraform/terraform.tfstate
+{
+  "type": "local",
+  "path": "/Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate"
+}
+
+# init copied the state but left the old local copy, which would go stale: remove it, the shared state is now the only one
+
+$ rm infra/envs/dev/terraform.tfstate infra/envs/dev/terraform.tfstate.backup && ls -a infra/envs/dev
+.
+..
+.terraform
+.terraform.lock.hcl
+dev.tfvars
+main.tf
+shared.backend.hcl
+
+# The migrated state still matches the infrastructure (exit code 0 = no changes)
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false -detailed-exitcode >/dev/null; echo "exit code: $?"
+exit code: 0
+
+# 3.4 List the resources of the state and inspect the container
+
+$ terraform -chdir=infra/envs/dev state list
+module.webapp.docker_container.web
+module.webapp.docker_image.app
+
+$ terraform -chdir=infra/envs/dev state show -no-color module.webapp.docker_container.web
+# module.webapp.docker_container.web:
+resource "docker_container" "web" {
+    attach                                      = false
+    bridge                                      = null
+    command                                     = [
+        "nginx",
+        "-g",
+        "daemon off;",
+    ]
+    container_read_refresh_timeout_milliseconds = 15000
+    cpu_set                                     = null
+    cpu_shares                                  = 0
+    domainname                                  = null
+    entrypoint                                  = [
+        "/docker-entrypoint.sh",
+    ]
+    env                                         = []
+    hostname                                    = "75df67876cc4"
+    id                                          = "75df67876cc4ea6872cd33db23726014475763578cd27227f120b7f0bcb85613"
+    image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+    init                                        = false
+    ipc_mode                                    = "private"
+    log_driver                                  = "json-file"
+    logs                                        = false
+    max_retry_count                             = 0
+    memory                                      = 0
+    memory_reservation                          = 0
+    memory_swap                                 = 0
+    must_run                                    = true
+    name                                        = "webapp-dev"
+    network_data                                = [
+        {
+            gateway                   = "172.17.0.1"
+            global_ipv6_address       = null
+            global_ipv6_prefix_length = 0
+            ip_address                = "172.17.0.2"
+            ip_prefix_length          = 16
+            ipv6_gateway              = null
+            mac_address               = "7e:b1:ed:e5:c5:43"
+            network_name              = "bridge"
+        },
+    ]
+    network_mode                                = "bridge"
+    pid_mode                                    = null
+    privileged                                  = false
+    publish_all_ports                           = false
+    read_only                                   = false
+    remove_volumes                              = true
+    restart                                     = "no"
+    rm                                          = false
+    runtime                                     = "runc"
+    security_opts                               = []
+    shm_size                                    = 64
+    start                                       = true
+    stdin_open                                  = false
+    stop_signal                                 = "SIGQUIT"
+    stop_timeout                                = 0
+    tty                                         = false
+    user                                        = null
+    userns_mode                                 = null
+    wait                                        = false
+    wait_timeout                                = 60
+    working_dir                                 = null
+
+    ports {
+        external = 8083
+        internal = 80
+        ip       = "0.0.0.0"
+        protocol = "tcp"
+    }
+}
+
+# 3.5 Drift: webapp-dev is recreated by hand with Docker, on port 8085 instead of 8083
+
+$ docker rm -f webapp-dev
+webapp-dev
+
+$ docker run -d --name webapp-dev -p 8085:80 nginx:1.27
+8bf18b25b0dbd809bb87376907052ed2e862c5df3f083c1fa836cb07643fb6a9
+
+$ docker ps --filter name=webapp- --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+NAMES            IMAGE          STATUS                  PORTS
+webapp-dev       nginx:1.27     Up Less than a second   0.0.0.0:8085->80/tcp, [::]:8085->80/tcp
+webapp-staging   6784fb0834aa   Up 10 minutes           0.0.0.0:8084->80/tcp
+
+$ curl -si --retry 5 --retry-connrefused --retry-delay 1 http://localhost:8085 | grep -E '^HTTP|<title>'
+HTTP/1.1 200 OK
+<title>Welcome to nginx!</title>
+
+$ curl -sS --max-time 3 http://localhost:8083
+curl: (7) Failed to connect to localhost port 8083 after 0 ms: Couldn't connect to server
+
+# plan -refresh-only: what changed outside Terraform, without proposing any action
+
+$ terraform -chdir=infra/envs/dev plan -refresh-only -var-file=dev.tfvars -no-color -input=false
+module.webapp.docker_image.app: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+module.webapp.docker_container.web: Refreshing state... [id=75df67876cc4ea6872cd33db23726014475763578cd27227f120b7f0bcb85613]
+
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # module.webapp.docker_container.web has been deleted
+  - resource "docker_container" "web" {
+      - attach                                      = false -> null
+      - command                                     = [
+          - "nginx",
+          - "-g",
+          - "daemon off;",
+        ] -> null
+      - container_read_refresh_timeout_milliseconds = 15000 -> null
+      - cpu_shares                                  = 0 -> null
+      - entrypoint                                  = [
+          - "/docker-entrypoint.sh",
+        ] -> null
+      - env                                         = [] -> null
+      - hostname                                    = "75df67876cc4" -> null
+      - id                                          = "75df67876cc4ea6872cd33db23726014475763578cd27227f120b7f0bcb85613" -> null
+      - image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d" -> null
+      - init                                        = false -> null
+      - ipc_mode                                    = "private" -> null
+      - log_driver                                  = "json-file" -> null
+      - logs                                        = false -> null
+      - max_retry_count                             = 0 -> null
+      - memory                                      = 0 -> null
+      - memory_reservation                          = 0 -> null
+      - memory_swap                                 = 0 -> null
+      - must_run                                    = true -> null
+      - name                                        = "webapp-dev" -> null
+      - network_data                                = [
+          - {
+              - gateway                   = "172.17.0.1"
+              - global_ipv6_prefix_length = 0
+              - ip_address                = "172.17.0.2"
+              - ip_prefix_length          = 16
+              - mac_address               = "7e:b1:ed:e5:c5:43"
+              - network_name              = "bridge"
+                # (2 unchanged attributes hidden)
+            },
+        ] -> null
+      - network_mode                                = "bridge" -> null
+      - privileged                                  = false -> null
+      - publish_all_ports                           = false -> null
+      - read_only                                   = false -> null
+      - remove_volumes                              = true -> null
+      - restart                                     = "no" -> null
+      - rm                                          = false -> null
+      - runtime                                     = "runc" -> null
+      - security_opts                               = [] -> null
+      - shm_size                                    = 64 -> null
+      - start                                       = true -> null
+      - stdin_open                                  = false -> null
+      - stop_signal                                 = "SIGQUIT" -> null
+      - stop_timeout                                = 0 -> null
+      - tty                                         = false -> null
+      - wait                                        = false -> null
+      - wait_timeout                                = 60 -> null
+        # (7 unchanged attributes hidden)
+
+      - ports {
+          - external = 8083 -> null
+          - internal = 80 -> null
+          - ip       = "0.0.0.0" -> null
+          - protocol = "tcp" -> null
+        }
+    }
+
+
+This is a refresh-only plan, so Terraform will not take any actions to undo
+these. If you were expecting these changes then you can apply this plan to
+record the updated values in the Terraform state without changing any remote
+objects.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Changes to Outputs:
+  ~ container_name = "webapp-dev" -> (known after apply)
+
+You can apply this plan to save these new output values to the Terraform
+state, without changing any real infrastructure.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
+
+# plan: the drift, and what Terraform would do to go back to the code
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false
+module.webapp.docker_image.app: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+module.webapp.docker_container.web: Refreshing state... [id=75df67876cc4ea6872cd33db23726014475763578cd27227f120b7f0bcb85613]
+
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # module.webapp.docker_container.web has been deleted
+  - resource "docker_container" "web" {
+        id                                          = "75df67876cc4ea6872cd33db23726014475763578cd27227f120b7f0bcb85613"
+      - name                                        = "webapp-dev" -> null
+        # (42 unchanged attributes hidden)
+
+        # (1 unchanged block hidden)
+    }
+
+
+Unless you have made equivalent changes to your configuration, or ignored the
+relevant attributes using ignore_changes, the following plan may include
+actions to undo or respond to these changes.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # module.webapp.docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "webapp-dev"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8083
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false -detailed-exitcode >/dev/null; echo "exit code: $?"
+exit code: 2
+
+# Terraform tracks the container by ID: the new one (new ID) is invisible to it, but it holds the name webapp-dev, so apply fails
+
+$ terraform -chdir=infra/envs/dev apply -var-file=dev.tfvars -no-color -input=false -auto-approve 2>&1 | grep -A3 'Error:'
+Error: Unable to create container: Error response from daemon: Conflict. The container name "/webapp-dev" is already in use by container "8bf18b25b0dbd809bb87376907052ed2e862c5df3f083c1fa836cb07643fb6a9". You have to remove (or rename) that container to be able to reuse that name.
+
+  with module.webapp.docker_container.web,
+  on ../../modules/webapp/main.tf line 21, in resource "docker_container" "web":
+
+# Back to the code: remove the hand-made container and apply
+
+$ docker rm -f webapp-dev
+webapp-dev
+
+$ terraform -chdir=infra/envs/dev apply -var-file=dev.tfvars -no-color -input=false -auto-approve
+module.webapp.docker_image.app: Refreshing state... [id=sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7dnginx:1.27]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # module.webapp.docker_container.web will be created
+  + resource "docker_container" "web" {
+      + attach                                      = false
+      + bridge                                      = (known after apply)
+      + command                                     = (known after apply)
+      + container_logs                              = (known after apply)
+      + container_read_refresh_timeout_milliseconds = 15000
+      + entrypoint                                  = (known after apply)
+      + env                                         = (known after apply)
+      + exit_code                                   = (known after apply)
+      + hostname                                    = (known after apply)
+      + id                                          = (known after apply)
+      + image                                       = "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+      + init                                        = (known after apply)
+      + ipc_mode                                    = (known after apply)
+      + log_driver                                  = (known after apply)
+      + logs                                        = false
+      + memory_reservation                          = 0
+      + must_run                                    = true
+      + name                                        = "webapp-dev"
+      + network_data                                = (known after apply)
+      + network_mode                                = "bridge"
+      + read_only                                   = false
+      + remove_volumes                              = true
+      + restart                                     = "no"
+      + rm                                          = false
+      + runtime                                     = (known after apply)
+      + security_opts                               = (known after apply)
+      + shm_size                                    = (known after apply)
+      + start                                       = true
+      + stdin_open                                  = false
+      + stop_signal                                 = (known after apply)
+      + stop_timeout                                = (known after apply)
+      + tty                                         = false
+      + wait                                        = false
+      + wait_timeout                                = 60
+
+      + healthcheck (known after apply)
+
+      + labels (known after apply)
+
+      + ports {
+          + external = 8083
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+module.webapp.docker_container.web: Creating...
+module.webapp.docker_container.web: Creation complete after 0s [id=a90871803e729a4ec377be9a1594c724128f7a31457bdc9b7cab143ed837bb6c]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+app_url = "http://localhost:8083"
+container_name = "webapp-dev"
+
+$ docker ps --filter name=webapp- --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+NAMES            IMAGE          STATUS                  PORTS
+webapp-dev       6784fb0834aa   Up Less than a second   0.0.0.0:8083->80/tcp
+webapp-staging   6784fb0834aa   Up 10 minutes           0.0.0.0:8084->80/tcp
+
+$ curl -si --retry 5 --retry-connrefused --retry-delay 1 http://localhost:8083 | grep -E '^HTTP|<title>'
+HTTP/1.1 200 OK
+<title>Welcome to nginx!</title>
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false -detailed-exitcode >/dev/null; echo "exit code: $?"
+exit code: 0
+
+# Q4: the backend locks the state while an operation runs
+
+# A first apply (pending change: port 8099) holds the lock while it waits at its approval prompt; it is answered 'no' after 15 s
+
+$ ls -lan /Users/Shared/terraform-state/efrei-devops-lab/dev
+total 32
+drwxr-xr-x@ 5 501  0   160 Nov 24 10:59 .
+drwxr-xr-x@ 3 501  0    96 Nov 24 10:59 ..
+-rw-------@ 1 501  0   274 Nov 24 10:59 .terraform.tfstate.lock.info
+-rw-r--r--@ 1 501  0  5581 Nov 24 10:59 terraform.tfstate
+-rw-r--r--@ 1 501  0  1984 Nov 24 10:59 terraform.tfstate.backup
+
+$ sed -E 's/(Who: +).*/\1<user>@<host>/; s/("Who":")[^"]*/\1<user>@<host>/' /Users/Shared/terraform-state/efrei-devops-lab/dev/.terraform.tfstate.lock.info; echo
+{"ID":"397dbcee-ea10-d728-1df6-2d9c3b4ce40b","Operation":"OperationTypeApply","Info":"","Who":"<user>@<host>","Version":"1.17.2","Created":"2026-11-24T09:59:34.645894Z","Path":"/Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate"}
+
+# A second command on the same state, meanwhile
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false -lock-timeout=3s 2>&1 | sed -E 's/(Who: +).*/\1<user>@<host>/; s/("Who":")[^"]*/\1<user>@<host>/'
+Acquiring state lock. This may take a few moments...
+
+Error: Error acquiring the state lock
+
+Error message: resource temporarily unavailable
+Lock Info:
+  ID:        397dbcee-ea10-d728-1df6-2d9c3b4ce40b
+  Path:      /Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate
+  Operation: OperationTypeApply
+  Who:       <user>@<host>
+  Version:   1.17.2
+  Created:   2026-11-24 09:59:34.645894 +0000 UTC
+  Info:      
+
+
+Terraform acquires a state lock to protect the state from being written
+by multiple users at the same time. Please resolve the issue above and try
+again. For most commands, you can disable locking with the "-lock=false"
+flag, but this is not recommended.
+
+# The first apply, once answered
+
+$ grep -E 'Do you want|Enter a value|Apply cancelled' /var/folders/w3/mly6vys15nbdb16vdlm4p4pr0000gn/T/tmp.CDsc6C5179
+Do you want to perform these actions?
+  Enter a value: 
+Apply cancelled.
+
+$ ls -lan /Users/Shared/terraform-state/efrei-devops-lab/dev
+total 24
+drwxr-xr-x@ 4 501  0   128 Nov 24 10:59 .
+drwxr-xr-x@ 3 501  0    96 Nov 24 10:59 ..
+-rw-r--r--@ 1 501  0  5581 Nov 24 10:59 terraform.tfstate
+-rw-r--r--@ 1 501  0  1984 Nov 24 10:59 terraform.tfstate.backup
+
+$ terraform -chdir=infra/envs/dev plan -var-file=dev.tfvars -no-color -input=false -detailed-exitcode >/dev/null; echo "exit code: $?"
+exit code: 0
+
+# Q5: the shared state is plain JSON, readable by every user of this Mac (-rw-r--r--)
+
+$ ls -ln /Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate
+-rw-r--r--@ 1 501  0  5581 Nov 24 10:59 /Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate
+
+$ jq '{version, terraform_version, serial, lineage, resources: [.resources[] | {module, type, name, attributes: (.instances[0].attributes | keys | length)}]}' /Users/Shared/terraform-state/efrei-devops-lab/dev/terraform.tfstate
+{
+  "version": 4,
+  "terraform_version": "1.17.2",
+  "serial": 22,
+  "lineage": "8faa12b3-62b8-689d-e8ec-33dd282c732a",
+  "resources": [
+    {
+      "module": "module.webapp",
+      "type": "docker_container",
+      "name": "web",
+      "attributes": 72
+    },
+    {
+      "module": "module.webapp",
+      "type": "docker_image",
+      "name": "app",
+      "attributes": 11
+    }
+  ]
+}
