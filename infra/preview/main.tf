@@ -154,7 +154,10 @@ resource "kubernetes_deployment" "app" {
           }
 
           security_context {
-            allow_privilege_escalation = false
+            # DELIBERATE MISCONFIGURATION (Lab 3, part 5.5), reverted next:
+            # a privileged container that may escalate privileges.
+            privileged                 = true
+            allow_privilege_escalation = true
             read_only_root_filesystem  = true
             capabilities {
               drop = ["ALL"]
