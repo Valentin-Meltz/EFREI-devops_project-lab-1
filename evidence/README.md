@@ -38,5 +38,7 @@ Real outputs captured on 2026-11-24 with Terraform v1.17.2 and Docker 28.4.0 (Do
 | Part | File | What it shows |
 | --- | --- | --- |
 | 1 | [08-terraform-quickstart/quickstart.txt](08-terraform-quickstart/quickstart.txt) | `init`/`fmt`/`validate`/`plan`, apply and `curl :8081` → `200 OK`, port 8081 → 8082 plan (**`-/+` must be replaced, `# forces replacement`**), `show` and `state list`, **container deleted with `docker rm -f` → plan proposes to create it again** (`-detailed-exitcode` 2), re-apply → exit code 0, what the state holds and `git check-ignore` on it (Q2) |
+| 2 | [09-terraform-modules/modules.txt](09-terraform-modules/modules.txt) | `webapp` module code, quickstart destroyed, **dev and staging applied separately** (`-chdir` + `-var-file`), **`webapp-dev` :8083 and `webapp-staging` :8084 side by side**, both `200 OK`, outputs, one state per folder with the same addresses, dev plan unchanged after the staging apply (exit code 0), variable validation errors (Q3) |
 
-- The script starts by destroying any previous run and setting `external` back to 8081, then changes it to 8082 itself (1.3). It leaves `tf-web` running on 8082 and `main.tf` at 8082, the end state of part 1.
+- Script 08 starts by destroying any previous run and setting `external` back to 8081, then changes it to 8082 itself (1.3), and leaves `main.tf` at 8082, the end state of part 1. Script 09 then destroys `tf-web`: the module replaces it.
+- The module sets `keep_locally = true` on its image: dev and staging use the same `nginx:1.27` on the same Docker host, and destroying one environment must not try to delete an image the other still runs.
