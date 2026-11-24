@@ -95,3 +95,25 @@ A lock must not be bypassed with `-lock=false`, and `terraform force-unlock` is 
 Anyone who can read the backend can read all of this. That is why access to the backend is restricted, encrypted at rest and audited, and why state and saved plans (which hold the same values) never go to Git or into CI logs. Recent Terraform versions can also keep some secrets out of the state entirely, with ephemeral resources and write-only arguments.
 
 **Observed** ([10](evidence/10-terraform-state/state.txt)): the dev state holds no password, but `state show` prints all 72 attributes of the container: command, entrypoint, environment variables, hostname, the bridge IP `172.17.0.2`, ports and image. If the Lab 2 `API_KEY` were passed to this container as an environment variable, it would sit in clear text in `env`. In the shared folder the state file is `-rw-r--r--`, readable by every account on this Mac, so whoever can read the backend reads everything. The lock info names the local user and machine (`Who`), which is why that field is masked in the evidence.
+
+Part 4 keeps a real secret out of the state. The GHCR pull token reaches Terraform through an ephemeral variable (`TF_VAR_ghcr_token`) and goes to Kubernetes through the write-only argument `data_wo`. In both preview states the secret has `data: null`, and the token appears 0 times, raw or base64-encoded ([11](evidence/11-terraform-preview/preview.txt)).
+
+## Q6 — What could go wrong if the preview environment is never destroyed? List three mitigations.
+A forgotten preview keeps running, and nobody looks at it any more:
+- **Cost and capacity.** Each preview reserves CPU and memory, and in the cloud often a load balancer, public IPs and volumes too. Dozens of abandoned PRs fill the shared cluster: new previews stay `Pending`, the autoscaler adds nodes, and the bill grows silently.
+- **Security.** The preview runs old code that is never patched, sometimes with debug settings or test data, and sometimes behind a public URL. It also keeps credentials alive: here every preview namespace holds a copy of the GHCR pull token in its `ghcr-pull` Secret. Every forgotten preview adds to the attack surface.
+- **Confusion and drift.** Stale environments trigger alerts and mislead people about what is deployed. Quotas and names run out. If the per-PR state file is lost, nobody can destroy the preview cleanly or say who owns it.
+- **Data and compliance.** A preview filled with a copy of real data keeps personal data longer than allowed.
+
+Mitigations:
+1. **Destroy on PR close.** A workflow triggered by `pull_request` with `types: [closed]` runs `terraform destroy` with that PR's state and then deletes the state. Merged and abandoned PRs both clean up after themselves.
+2. **A TTL with a scheduled cleanup job.** Every preview gets `owner` and `expires` labels at creation. A scheduled job (a cron workflow or a Kubernetes CronJob) lists the namespaces labelled `purpose=preview` whose `expires` date has passed, destroys them, and notifies the owner. Extending a preview is an explicit action.
+3. **Caps per preview and in total.** Small requests and limits plus one replica per preview, a `ResourceQuota`/`LimitRange` in each preview namespace, and a limit on the number of concurrent previews. Scaling idle previews to zero helps too.
+4. **Cost visibility.** The `purpose`, `pr` and `owner` labels feed cost-allocation reports and budget alerts, so a forgotten preview is noticed and has someone to blame.
+
+**Observed** ([11](evidence/11-terraform-preview/preview.txt)):
+- PR 42 (release v1.1.0) and PR 43 (release v1.0.0) run side by side in `pr-42` and `pr-43`. Each has its own state file (`state/pr-42.tfstate`, `state/pr-43.tfstate`) and the same resource names. Each answers with its own version and `"environment":"pr-4x"`.
+- Switching PRs without `-reconfigure` is refused (`Backend configuration changed`), so one PR's state cannot be migrated into another's by mistake.
+- `terraform destroy` for PR 42 removes the namespace and everything in it: `namespaces "pr-42" not found`, `No resources found in pr-42 namespace`, and its state holds 0 resources. PR 43 keeps running and answering.
+- The namespaces carry `owner=Valentin-Meltz` and `expires=2026-11-27` (creation date + 3 days, unchanged by later plans). The cleanup query finds no expired preview today; with a simulated date of 2026-12-31 it lists `pr-43 owner=Valentin-Meltz expired=2026-11-27`.
+- Each preview requests 50m CPU and 64Mi of memory, with 1 replica.
